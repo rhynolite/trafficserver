@@ -34,5 +34,4 @@ SUBDIRS = helloworld \
 	  timeout_example \
       internal_transaction_handling \
       async_timer \
-      intercept \
-			boom
+      intercept
