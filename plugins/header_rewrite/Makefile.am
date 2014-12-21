@@ -16,16 +16,14 @@
 
 include $(top_srcdir)/build/plugins.mk
 
-if BUILD_HAVE_BOOST
-
-AM_CPPFLAGS += $(BOOST_CPPFLAGS)
-
 pkglib_LTLIBRARIES = header_rewrite.la
 header_rewrite_la_SOURCES = \
   condition.cc \
   conditions.cc \
+  expander.cc \
   factory.cc \
   header_rewrite.cc \
+  lulu.cc \
   matcher.cc \
   operator.cc \
   operators.cc \
@@ -33,8 +31,6 @@ header_rewrite_la_SOURCES = \
   regex_helper.cc \
   resources.cc \
   ruleset.cc \
-  statement.cc \
-  expander.cc
-header_rewrite_la_LDFLAGS = $(BOOST_LDFLAGS) $(TS_PLUGIN_LDFLAGS)
+  statement.cc
 
-endif
+header_rewrite_la_LDFLAGS = $(TS_PLUGIN_LDFLAGS)

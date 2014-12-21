@@ -35,6 +35,8 @@
 #include "HttpSM.h"
 #include "HttpTunnel.h"
 
+class PluginVC;
+
 class FetchSM: public Continuation
 {
 public:
@@ -43,18 +45,18 @@ public:
 
   void init_comm()
   {
+    is_internal_request = true;
     recursion = 0;
     req_finished = 0;
-    resp_finished = 0;
+    is_method_head = 0;
     header_done = 0;
     user_data = NULL;
     has_sent_header = false;
-    proto_stack = (1u << TS_PROTO_HTTP);
-    req_method = TS_FETCH_METHOD_NONE;
     req_content_length = 0;
     resp_is_chunked = -1;
     resp_content_length = -1;
-    resp_recived_body_len = 0;
+    resp_received_body_len = 0;
+    resp_received_close = -1;
     cont_mutex.clear();
     req_buffer = new_MIOBuffer(HTTP_HEADER_BUFFER_SIZE_INDEX);
     req_reader = req_buffer->alloc_reader();
@@ -108,19 +110,19 @@ public:
   //
   // *flags* can be bitwise OR of several TSFetchFlags
   //
-  void ext_init(Continuation *cont, TSFetchMethod method,
+  void ext_init(Continuation *cont, const char *method,
                 const char *url, const char *version,
                 const sockaddr *client_addr, int flags);
   void ext_add_header(const char *name, int name_len,
                       const char *value, int value_len);
-  void ext_lanuch();
+  void ext_launch();
   void ext_destroy();
   ssize_t ext_read_data(char *buf, size_t len);
   void ext_write_data(const void *data, size_t len);
   void ext_set_user_data(void *data);
   void* ext_get_user_data();
-  void ext_set_proto_stack(TSClientProtoStack proto_stack);
-  TSClientProtoStack ext_get_proto_stack();
+  bool get_internal_request() { return is_internal_request; }
+  void set_internal_request(bool val) { is_internal_request = val; }
 
 private:
   int InvokePlugin(int event, void*data);
@@ -135,14 +137,17 @@ private:
   }
 
   int64_t getReqLen() const { return req_reader->read_avail(); }
+  /// Check if the comma supproting MIME field @a name has @a value in it.
+  bool check_for_field_value(char const* name, size_t name_len, char const* value, size_t value_len);
 
   bool has_body();
   bool check_body_done();
   bool check_chunked();
+  bool check_connection_close();
   int dechunk_body();
 
   int recursion;
-  TSVConn http_vc;
+  PluginVC* http_vc;
   VIO *read_vio;
   VIO *write_vio;
   MIOBuffer *req_buffer;
@@ -160,17 +165,17 @@ private:
   TSFetchWakeUpOptions callback_options;
   bool req_finished;
   bool header_done;
-  bool resp_finished;
+  bool is_method_head;
+  bool is_internal_request;
   IpEndpoint _addr;
   int resp_is_chunked;
+  int resp_received_close;
   int fetch_flags;
   void *user_data;
   bool has_sent_header;
-  TSClientProtoStack proto_stack;
-  TSFetchMethod req_method;
   int64_t req_content_length;
   int64_t resp_content_length;
-  int64_t resp_recived_body_len;
+  int64_t resp_received_body_len;
 };
 
 #endif

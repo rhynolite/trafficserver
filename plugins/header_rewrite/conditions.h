@@ -23,9 +23,9 @@
 #define __CONDITIONS_H__ 1
 
 #include <string>
-#include <ts/ts.h>
-#include <boost/lexical_cast.hpp>
 #include <cstring>
+
+#include "ts/ts.h"
 
 #include "condition.h"
 #include "matcher.h"
@@ -327,6 +327,43 @@ private:
   std::string _file;
   Value _key;
   TSMutex _mutex;
+};
+
+class ConditionInternalTransaction : public Condition
+{
+public:
+  void append_value(std::string &/* s ATS_UNUSED */, const Resources &/* res ATS_UNUSED */) { }
+
+protected:
+  bool eval(const Resources &res);
+};
+
+class ConditionClientIp : public Condition
+{
+public:
+  void initialize(Parser& p);
+  void append_value(std::string &s, const Resources &res);
+
+protected:
+  bool eval(const Resources &res);
+};
+
+class ConditionIncomingPort : public Condition
+{
+public:
+  ConditionIncomingPort()
+  {
+    TSDebug(PLUGIN_NAME_DBG, "Calling CTOR for ConditionIncomingPort");
+  }
+
+  void initialize(Parser& p);
+  void append_value(std::string &s, const Resources &res);
+
+protected:
+  bool eval(const Resources &res);
+
+private:
+  DISALLOW_COPY_AND_ASSIGN(ConditionIncomingPort);
 };
 
 #endif // __CONDITIONS_H

@@ -104,21 +104,19 @@ LogFormat::setup(const char *name, const char *format_str, unsigned interval_sec
 
 int32_t LogFormat::id_from_name(const char *name)
 {
-  int32_t
-    id = 0;
+  int32_t id = 0;
   if (name) {
-    INK_MD5
-      name_md5;
-    name_md5.encodeBuffer(name, (int)::strlen(name));
+    CryptoHash hash;
+    MD5Context().hash_immediate(hash, name, static_cast<int>(strlen(name)));
 #if defined(linux)
     /* Mask most signficant bit so that return value of this function
      * is not sign extended to be a negative number.
      * This problem is only known to occur on Linux which
      * is a 32-bit OS.
      */
-    id = (int32_t) name_md5.fold() & 0x7fffffff;
+    id = (int32_t) hash.fold() & 0x7fffffff;
 #else
-    id = (int32_t) name_md5.fold();
+    id = (int32_t) hash.fold();
 #endif
   }
   return id;
@@ -410,7 +408,7 @@ LogFormat::format_from_specification(char *spec, char **file_name, char **file_h
 
   Debug("log-format", "custom:%d:%s:%s:%s:%d:%s", format_id, format_name, format_str, *file_name, *file_type, token);
 
-  format = NEW(new LogFormat(format_name, format_str));
+  format = new LogFormat(format_name, format_str);
   ink_assert(format != NULL);
   if (!format->valid()) {
     delete format;
@@ -434,7 +432,7 @@ LogFormat::parse_symbol_string(const char *symbol_string, LogFieldList *field_li
   char *sym_str;
   int field_count = 0;
   LogField *f;
-  char *symbol, *name, *sym;
+  char *symbol, *name, *sym, *saveptr;
   LogField::Container container;
   LogField::Aggregate aggregate;
 
@@ -446,10 +444,10 @@ LogFormat::parse_symbol_string(const char *symbol_string, LogFieldList *field_li
   *contains_aggregates = false; // we'll change if it does
 
   //
-  // strtok will mangle the input string; we'll make a copy for that.
+  // strtok_r will mangle the input string; we'll make a copy for that.
   //
   sym_str = ats_strdup(symbol_string);
-  symbol = strtok(sym_str, ",");
+  symbol = strtok_r(sym_str, ",", &saveptr);
 
   while (symbol != NULL) {
     //
@@ -479,7 +477,7 @@ LogFormat::parse_symbol_string(const char *symbol_string, LogFieldList *field_li
           } else if (f->type() != LogField::sINT) {
             Note("Only single integer field types may be aggregated");
           } else {
-            LogField *new_f = NEW(new LogField(*f));
+            LogField *new_f = new LogField(*f);
             new_f->set_aggregate_op(aggregate);
             field_list->add(new_f, false);
             field_count++;
@@ -508,7 +506,7 @@ LogFormat::parse_symbol_string(const char *symbol_string, LogFieldList *field_li
         if (container == LogField::NO_CONTAINER) {
           Note("Invalid container specification: %s", sym);
         } else {
-          f = NEW(new LogField(name, container));
+          f = new LogField(name, container);
           ink_assert(f != NULL);
           if (slice.m_enable) {
             f->m_slice = slice;
@@ -531,7 +529,7 @@ LogFormat::parse_symbol_string(const char *symbol_string, LogFieldList *field_li
       Debug("log-format", "Regular field symbol: %s", symbol);
       f = Log::global_field_list.find_by_symbol(symbol);
       if (f != NULL) {
-        LogField *cpy = NEW(new LogField(*f));
+        LogField *cpy = new LogField(*f);
         if (slice.m_enable) {
           cpy->m_slice = slice;
           Debug("log-slice", "symbol = %s, [%d:%d]", symbol,
@@ -548,7 +546,7 @@ LogFormat::parse_symbol_string(const char *symbol_string, LogFieldList *field_li
     //
     // Get the next symbol
     //
-    symbol = strtok(NULL, ",");
+    symbol = strtok_r(NULL, ",", &saveptr);
   }
 
   ats_free(sym_str);
@@ -817,7 +815,7 @@ LogFormatList::add(LogFormat * format, bool copy)
   ink_assert(format != NULL);
 
   if (copy) {
-    m_format_list.enqueue(NEW(new LogFormat(*format)));
+    m_format_list.enqueue(new LogFormat(*format));
   } else {
     m_format_list.enqueue(format);
   }

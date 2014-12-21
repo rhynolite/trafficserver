@@ -57,6 +57,15 @@ Options
 
     Clears accumulated statistics on the local node.
 
+.. option:: --drain
+
+    This option modifies the behavior of :option:`traffic_line -b`
+    and :option:`traffic_line -L` such that :program:`traffic_server`
+    is not shut down until the number of active client connections
+    drops to the number given by the
+    :ts:cv:`proxy.config.restart.active_client_threshold` configuration
+    variable.
+
 .. option:: -h, --help
 
     Print usage information and exit.
@@ -83,7 +92,7 @@ Options
 
 .. option:: -s VAR, --set_var VAR
 
-    Set the configuration variable named `VAR`. The value of the configuration
+    Set the configuration variable named *VAR*. The value of the configuration
     variable is given by the :option:`traffic_line -v` option.
     Refer to the :file:`records.config` documentation for a list
     of the configuration variables you can specify.
@@ -109,6 +118,10 @@ Options
     Initiate a Traffic Server configuration file reread. Use this
     command to update the running configuration after any configuration
     file modification.
+
+    The timestamp of the last reconfiguration event (in seconds
+    since epoch) is published in the `proxy.node.config.reconfigure_time`
+    metric.
 
 .. option:: -Z, --zero_cluster
 
@@ -138,7 +151,6 @@ Options
 .. option:: --status
 
    Show the current proxy server status, indicating if we're running or not.
-
 
 .. _traffic-line-performance-statistics:
 

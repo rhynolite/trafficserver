@@ -34,39 +34,34 @@
 #ifndef _LOCAL_MANAGER_H
 #define _LOCAL_MANAGER_H
 
-#include "Main.h"
 #include "Alarms.h"
 #include "BaseManager.h"
-#include "ClusterCom.h"
-#include "VMap.h"
 #include <records/I_RecHttp.h>
 #if TS_HAS_WCCP
 #include <wccp/Wccp.h>
 #endif
 
-#define ink_get_hrtime ink_get_hrtime_internal
-#define ink_get_based_hrtime ink_get_based_hrtime_internal
+class FileManager;
+class ClusterCom;
+class VMap;
+
+enum ManagementPendingOperation
+{
+  MGMT_PENDING_NONE,          // Do nothing
+  MGMT_PENDING_RESTART,       // Restart TS and TM
+  MGMT_PENDING_BOUNCE,        // Restart TS
+  MGMT_PENDING_IDLE_RESTART,  // Restart TS and TM when TS is idle
+  MGMT_PENDING_IDLE_BOUNCE    // Restart TS when TS is idle
+};
 
 class LocalManager: public BaseManager
 {
 public:
-  LocalManager(bool proxy_on);
-
-  ~LocalManager()
-  {
-    delete alarm_keeper;
-    delete virt_map;
-    delete ccom;
-    ats_free(bin_path);
-    ats_free(absolute_proxy_binary);
-    ats_free(proxy_name);
-    ats_free(proxy_binary);
-    ats_free(proxy_options);
-    ats_free(env_prep);
-  };
+  explicit LocalManager(bool proxy_on);
+  ~LocalManager();
 
   void initAlarm();
-  void initCCom(int mcport, char *addr, int rsport);
+  void initCCom(const AppVersionInfo& version, FileManager * files, int mcport, char *addr, int rsport);
   void initMgmtProcessServer();
   void pollMgmtProcessServer();
   void handleMgmtMsgFromProcesses(MgmtMessageHdr * mh);
@@ -86,7 +81,7 @@ public:
   void closeProxyPorts();
 
   void mgmtCleanup();
-  void mgmtShutdown(bool mainThread = false);
+  void mgmtShutdown();
   void processShutdown(bool mainThread = false);
   void processRestart();
   void processBounce();
@@ -95,7 +90,6 @@ public:
 
   bool processRunning();
   bool clusterOk();
-  bool SetForDup(void *hIOCPort, long lTProcId, void *hTh);
 
   void tick()
   {
@@ -113,7 +107,7 @@ public:
   volatile time_t proxy_started_at;
   volatile int proxy_launch_count;
   volatile bool proxy_launch_outstanding;
-  volatile bool mgmt_shutdown_outstanding;
+  volatile ManagementPendingOperation mgmt_shutdown_outstanding;
   volatile int proxy_running;
   HttpProxyPort::Group m_proxy_ports;
   // Local inbound addresses to bind, if set.
@@ -123,8 +117,6 @@ public:
   int process_server_timeout_secs;
   int process_server_timeout_msecs;
 
-  char pserver_path[PATH_NAME_MAX];
-  char *bin_path;
   char *absolute_proxy_binary;
   char *proxy_name;
   char *proxy_binary;
@@ -139,15 +131,14 @@ public:
 
   Alarms *alarm_keeper;
   VMap *virt_map;
+  FileManager *configFiles;
 
   ClusterCom *ccom;
 
   volatile int internal_ticker;
   volatile pid_t watched_process_pid;
 
-#ifdef MGMT_USE_SYSLOG
   int syslog_facility;
-#endif
 
 #if TS_HAS_WCCP
   wccp::Cache wccp_cache;
@@ -156,6 +147,5 @@ private:
 };                              /* End class LocalManager */
 
 extern LocalManager *lmgmt;
-
 
 #endif /* _LOCAL_MANAGER_H */

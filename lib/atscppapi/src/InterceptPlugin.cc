@@ -37,17 +37,6 @@
 using namespace atscppapi;
 using std::string;
 
-namespace {
-
-/** This contains info for the continuation callback to invoke the plugin */
-struct PluginHandle {
-  InterceptPlugin *plugin_;
-  shared_ptr<Mutex> mutex_;
-  PluginHandle(InterceptPlugin *plugin, shared_ptr<Mutex> mutex) : plugin_(plugin), mutex_(mutex) { }
-};
-
-}
-
 /**
  * @private
  */
@@ -83,12 +72,22 @@ struct InterceptPlugin::State {
   TSMBuffer hdr_buf_;
   TSMLoc hdr_loc_;
   int num_bytes_written_;
-  PluginHandle *plugin_handle_;
-  bool shut_down_;
+  shared_ptr<Mutex> plugin_mutex_;
+  InterceptPlugin *plugin_;
+  Headers request_headers_;
 
-  State(TSCont cont) : cont_(cont), net_vc_(NULL), expected_body_size_(0), num_body_bytes_read_(0),
-                       hdr_parsed_(false), hdr_buf_(NULL), hdr_loc_(NULL), num_bytes_written_(0), 
-                       plugin_handle_(NULL), shut_down_(false) {
+  /** these two fields to be used by the continuation callback only */
+  TSEvent saved_event_;
+  void *saved_edata_;
+
+  TSAction timeout_action_;
+  bool plugin_io_done_;
+
+  State(TSCont cont, InterceptPlugin *plugin)
+    : cont_(cont), net_vc_(NULL), expected_body_size_(0), num_body_bytes_read_(0), hdr_parsed_(false),
+      hdr_buf_(NULL), hdr_loc_(NULL), num_bytes_written_(0), plugin_(plugin), timeout_action_(NULL),
+      plugin_io_done_(false) {
+    plugin_mutex_ = plugin->getMutex();
     http_parser_ = TSHttpParserCreate();
   }
   
@@ -106,15 +105,15 @@ struct InterceptPlugin::State {
 namespace {
 
 int handleEvents(TSCont cont, TSEvent event, void *edata);
+void destroyCont(InterceptPlugin::State *state);
 
 }
 
 InterceptPlugin::InterceptPlugin(Transaction &transaction, InterceptPlugin::Type type)
   : TransactionPlugin(transaction) {
   TSCont cont = TSContCreate(handleEvents, TSMutexCreate());
-  state_ = new State(cont);
-  state_->plugin_handle_ = new PluginHandle(this, TransactionPlugin::getMutex());
-  TSContDataSet(cont, state_->plugin_handle_);
+  state_ = new State(cont, this);
+  TSContDataSet(cont, state_);
   TSHttpTxn txn = static_cast<TSHttpTxn>(transaction.getAtsHandle());
   if (type == SERVER_INTERCEPT) {
     TSHttpTxnServerIntercept(cont, txn);
@@ -122,46 +121,22 @@ InterceptPlugin::InterceptPlugin(Transaction &transaction, InterceptPlugin::Type
   else {
     TSHttpTxnIntercept(cont, txn);
   }
-  Headers &request_headers = transaction.getClientRequest().getHeaders();
-  string content_length_str = request_headers.value("Content-Length");
-  if (!content_length_str.empty()) {
-    const char *start_ptr = content_length_str.data();
-    char *end_ptr;
-    int content_length = strtol(start_ptr, &end_ptr, 10 /* base */);
-    if ((errno != ERANGE) && (end_ptr != start_ptr) && (*end_ptr == '\0')) {
-      LOG_DEBUG("Got content length: %d", content_length);
-      state_->expected_body_size_ = content_length;
-    }
-    else {
-      LOG_ERROR("Invalid content length header [%s]; Assuming no content", content_length_str.c_str());
-    }
-  }
-  if (request_headers.value("Transfer-Encoding") == "chunked") {
-    // implementing a "dechunker" is non-trivial and in the real
-    // world, most browsers don't send chunked requests
-    LOG_ERROR("Support for chunked request not implemented! Assuming no body");
-  }
-  LOG_DEBUG("Expecting %d bytes of request body", state_->expected_body_size_);
 }
 
 InterceptPlugin::~InterceptPlugin() {
-  if (!state_->shut_down_) {
-    // transaction is closing, but intercept hasn't finished. Indicate
-    // that plugin is dead (cleanup will be done by continuation
-    // callback)
-    state_->plugin_handle_->plugin_ = NULL;
+  if (state_->cont_) {
+    LOG_DEBUG("Relying on callback for cleanup");
+    state_->plugin_ = NULL; // prevent callback from invoking plugin
   }
-  else {
-    TSContDestroy(state_->cont_);
-    delete state_->plugin_handle_;
+  else { // safe to cleanup
+    LOG_DEBUG("Normal cleanup");
+    delete state_;
   }
-  delete state_;
 }
 
 bool InterceptPlugin::produce(const void *data, int data_size) {
-  ScopedSharedMutexLock scopedLock(getMutex());
   if (!state_->net_vc_) {
-    LOG_ERROR("Intercept not operational yet");
+    LOG_ERROR("Intercept not operational");
     return false;
   }
   if (!state_->output_.buffer_) {
@@ -184,7 +159,7 @@ bool InterceptPlugin::produce(const void *data, int data_size) {
 bool InterceptPlugin::setOutputComplete() {
   ScopedSharedMutexLock scopedLock(getMutex());
   if (!state_->net_vc_) {
-    LOG_ERROR("Intercept not operational yet");
+    LOG_ERROR("Intercept not operational");
     return false;
   }
   if (!state_->output_.buffer_) {
@@ -193,8 +168,13 @@ bool InterceptPlugin::setOutputComplete() {
   }
   TSVIONBytesSet(state_->output_.vio_, state_->num_bytes_written_);
   TSVIOReenable(state_->output_.vio_);
+  state_->plugin_io_done_ = true;
   LOG_DEBUG("Response complete");
   return true;
+}
+
+Headers &InterceptPlugin::getRequestHeaders() {
+  return state_->request_headers_;
 }
 
 bool InterceptPlugin::doRead() {
@@ -218,6 +198,25 @@ bool InterceptPlugin::doRead() {
         if (TSHttpHdrParseReq(state_->http_parser_, state_->hdr_buf_, state_->hdr_loc_, &data,
                               endptr) == TS_PARSE_DONE) {
           LOG_DEBUG("Parsed header");
+          string content_length_str = state_->request_headers_.value("Content-Length");
+          if (!content_length_str.empty()) {
+            const char *start_ptr = content_length_str.data();
+            char *end_ptr;
+            int content_length = strtol(start_ptr, &end_ptr, 10 /* base */);
+            if ((errno != ERANGE) && (end_ptr != start_ptr) && (*end_ptr == '\0')) {
+              LOG_DEBUG("Got content length: %d", content_length);
+              state_->expected_body_size_ = content_length;
+            }
+            else {
+              LOG_ERROR("Invalid content length header [%s]; Assuming no content", content_length_str.c_str());
+            }
+          }
+          if (state_->request_headers_.value("Transfer-Encoding") == "chunked") {
+            // implementing a "dechunker" is non-trivial and in the real
+            // world, most browsers don't send chunked requests
+            LOG_ERROR("Support for chunked request not implemented! Assuming no body");
+          }
+          LOG_DEBUG("Expecting %d bytes of request body", state_->expected_body_size_);
           state_->hdr_parsed_ = true;
           // remaining data in this block is body; 'data' will be pointing to first byte of the body
           num_body_bytes_in_block = endptr - data;
@@ -273,6 +272,7 @@ void InterceptPlugin::handleEvent(int abstract_event, void *edata) {
 
     state_->hdr_buf_ = TSMBufferCreate();
     state_->hdr_loc_ = TSHttpHdrCreate(state_->hdr_buf_);
+    state_->request_headers_.reset(state_->hdr_buf_, state_->hdr_loc_);
     TSHttpHdrTypeSet(state_->hdr_buf_, state_->hdr_loc_, TS_HTTP_TYPE_REQUEST);
     break;
 
@@ -298,11 +298,8 @@ void InterceptPlugin::handleEvent(int abstract_event, void *edata) {
     else if (event == TS_EVENT_NET_ACCEPT_FAILED) {
       LOG_ERROR("Got net_accept_failed!");
     }
-    LOG_DEBUG("Shutting down");
-    if (state_->net_vc_) {
-      TSVConnClose(state_->net_vc_);
-    }
-    state_->shut_down_ = true;
+    LOG_DEBUG("Shutting down intercept");
+    destroyCont(state_);
     break;
 
   default:
@@ -312,19 +309,57 @@ void InterceptPlugin::handleEvent(int abstract_event, void *edata) {
 
 namespace {
 
-int handleEvents(TSCont cont, TSEvent event, void *edata) {
-  PluginHandle *plugin_handle = static_cast<PluginHandle *>(TSContDataGet(cont));
-  ScopedSharedMutexLock scopedSharedMutexLock(plugin_handle->mutex_);
-  if (plugin_handle->plugin_) {
-    utils::internal::dispatchInterceptEvent(plugin_handle->plugin_, event, edata);
+int handleEvents(TSCont cont, TSEvent pristine_event, void *pristine_edata) {
+
+  // Separating pristine and mutable data helps debugging
+  TSEvent event = pristine_event;
+  void *edata = pristine_edata;
+
+  InterceptPlugin::State *state = static_cast<InterceptPlugin::State *>(TSContDataGet(cont));
+  ScopedSharedMutexTryLock scopedTryLock(state->plugin_mutex_);
+  if (!scopedTryLock.hasLock()) {
+    LOG_ERROR("Couldn't get plugin lock. Will retry");
+    if (event != TS_EVENT_TIMEOUT) { // save only "non-retry" info
+      state->saved_event_ = event;
+      state->saved_edata_ = edata;
+    }
+    state->timeout_action_ = TSContSchedule(cont, 1, TS_THREAD_POOL_DEFAULT);
+    return 0;
   }
-  else {
-    // plugin is dead; cleanup
-    LOG_ERROR("Received event %d after plugin died!", event);
-    TSContDestroy(cont);
-    delete plugin_handle;
+  if (event == TS_EVENT_TIMEOUT) { // we have a saved event to restore
+    state->timeout_action_ = NULL;
+    if (state->plugin_io_done_) { // plugin is done, so can't send it saved event
+      event = TS_EVENT_VCONN_EOS; // fake completion
+      edata = NULL;
+    }
+    else {
+      event = state->saved_event_;
+      edata = state->saved_edata_;
+    }
+  }
+  if (state->plugin_) {
+    utils::internal::dispatchInterceptEvent(state->plugin_, event, edata);
+  }
+  else if (state->timeout_action_) { // we had scheduled a timeout on ourselves; let's wait for it
+  }
+  else { // plugin was destroyed before intercept was completed; cleaning up here
+    LOG_DEBUG("Cleaning up as intercept plugin is already destroyed");
+    destroyCont(state);
+    delete state;
   }
   return 0;
+}
+
+void destroyCont(InterceptPlugin::State *state) {
+  if (state->net_vc_) {
+    TSVConnShutdown(state->net_vc_, 1, 1);
+    TSVConnClose(state->net_vc_);
+    state->net_vc_ = NULL;
+  }
+  if (!state->timeout_action_) {
+    TSContDestroy(state->cont_);
+    state->cont_ = NULL;
+  }
 }
 
 }

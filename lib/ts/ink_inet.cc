@@ -184,7 +184,7 @@ char const* ats_ip_nptop(
   sockaddr const* addr,
   char* dst, size_t size
 ) {
-  char buff[INET6_ADDRSTRLEN];
+  char buff[INET6_ADDRPORTSTRLEN];
   snprintf(dst, size, "%s:%u",
     ats_ip_ntop(addr, buff, sizeof(buff)),
     ats_ip_port_host_order(addr)
@@ -193,17 +193,19 @@ char const* ats_ip_nptop(
 }
 
 int
-ats_ip_parse(ts::ConstBuffer src, ts::ConstBuffer* addr, ts::ConstBuffer* port) {
+ats_ip_parse(ts::ConstBuffer src, ts::ConstBuffer* addr, ts::ConstBuffer* port, ts::ConstBuffer* rest) {
   // In case the incoming arguments are null.
   ts::ConstBuffer localAddr, localPort;
   if (!addr) addr = &localAddr;
   if (!port) port = &localPort;
   addr->reset();
   port->reset();
+  if (rest) rest->reset();
 
   // Let's see if we can find out what's in the address string.
   if (src) {
-    while (src && isspace(*src)) ++src;
+    bool colon_p = false;
+    while (src && ParseRules::is_ws(*src)) ++src;
     // Check for brackets.
     if ('[' == *src) {
       /* Ugly. In a number of places we must use bracket notation
@@ -222,34 +224,41 @@ ats_ip_parse(ts::ConstBuffer src, ts::ConstBuffer* addr, ts::ConstBuffer* port) 
       */
       ++src; // skip bracket.
       *addr = src.splitOn(']');
-      if (*addr && ':' == *src) { // found the closing bracket and port colon
-        ++src; // skip colon.
-        *port = src;
-      } // else it's a fail for unclosed brackets.
+      if (':' == *src) {
+        colon_p = true;
+        ++src;
+      }
     } else {
-      // See if there's exactly 1 colon
-      ts::ConstBuffer tmp = src.after(':');
-      if (tmp && ! tmp.find(':')) { // 1 colon and no others
-        src.clip(tmp.data() - 1); // drop port from address.
-        *port = tmp;
-      } // else 0 or > 1 colon and no brackets means no port.
-      *addr = src;
+      ts::ConstBuffer post = src.after(':');
+      if (post.data() && ! post.find(':')) {
+        *addr = src.splitOn(post.data()-1);
+        colon_p = true;
+      } else { // presume no port, use everything.
+        *addr = src;
+        src.reset();
+      }
     }
-    // clip port down to digits.
-    if (*port) {
-      char const* spot = port->data();
-      while (isdigit(*spot)) ++spot;
-      port->clip(spot);
+    if (colon_p) {
+      ts::ConstBuffer tmp(src);
+      while (src && ParseRules::is_digit(*src))
+        ++src;
+
+      if (tmp.data() == src.data()) { // no digits at all
+        src.set(tmp.data()-1, tmp.size()+1); // back up to include colon
+      } else {
+        *port = tmp.clip(src.data());
+      }
     }
+    if (rest) *rest = src;
   }
   return *addr ? 0 : -1; // true if we found an address.
 }
 
 int
-ats_ip_pton(char const* text, sockaddr* ip) {
+ats_ip_pton(const ts::ConstBuffer& src, sockaddr* ip)
+{
   int zret = -1;
   ts::ConstBuffer addr, port;
-  ts::ConstBuffer src(text, strlen(text)+1);
 
   ats_ip_invalidate(ip);
   if (0 == ats_ip_parse(src, &addr, &port)) {
@@ -338,6 +347,15 @@ IpAddr::load(char const* text) {
   return zret;
 }
 
+int
+IpAddr::load(ts::ConstBuffer const& text)
+{
+  IpEndpoint ip;
+  int zret = ats_ip_pton(text, &ip.sa);
+  this->assign(&ip.sa);
+  return zret;
+}
+
 char*
 IpAddr::toString(char* dest, size_t len) const {
   IpEndpoint ip;
@@ -368,6 +386,57 @@ operator == (IpAddr const& lhs, sockaddr const* rhs) {
   return zret;
 }
 
+/** Compare two IP addresses.
+    This is useful for IPv4, IPv6, and the unspecified address type.
+    If the addresses are of different types they are ordered
+
+    Non-IP < IPv4 < IPv6
+
+     - all non-IP addresses are the same ( including @c AF_UNSPEC )
+     - IPv4 addresses are compared numerically (host order)
+     - IPv6 addresses are compared byte wise in network order (MSB to LSB)
+
+    @return
+      - -1 if @a lhs is less than @a rhs.
+      - 0 if @a lhs is identical to @a rhs.
+      - 1 if @a lhs is greater than @a rhs.
+*/
+int
+IpAddr::cmp(self const& that) const {
+  int zret = 0;
+  uint16_t rtype = that._family;
+  uint16_t ltype = _family;
+
+  // We lump all non-IP addresses into a single equivalence class
+  // that is less than an IP address. This includes AF_UNSPEC.
+  if (AF_INET == ltype) {
+    if (AF_INET == rtype) {
+      in_addr_t la = ntohl(_addr._ip4);
+      in_addr_t ra = ntohl(that._addr._ip4);
+      if (la < ra) zret = -1;
+      else if (la > ra) zret = 1;
+      else zret = 0;
+    } else if (AF_INET6 == rtype) { // IPv4 < IPv6
+      zret = -1;
+    } else { // IP > not IP
+      zret = 1;
+    }
+  } else if (AF_INET6 == ltype) {
+    if (AF_INET6 == rtype) {
+      zret = memcmp(&_addr._ip6, &that._addr._ip6, TS_IP6_SIZE);
+    } else {
+      zret = 1; // IPv6 greater than any other type.
+    }
+  } else if (AF_INET == rtype || AF_INET6 == rtype) {
+    // ltype is non-IP so it's less than either IP type.
+    zret = -1;
+  } else { // Both types are non-IP so they're equal.
+    zret = 0;
+  }
+
+  return zret;
+}
+
 int
 ats_ip_getbestaddrinfo(char const* host,
   IpEndpoint* ip4,
@@ -395,7 +464,7 @@ ats_ip_getbestaddrinfo(char const* host,
     ai_hints.ai_family = AF_UNSPEC;
     ai_hints.ai_flags = AI_ADDRCONFIG;
     zret = getaddrinfo(addr_text.data(), 0, &ai_hints, &ai_result);
-  
+
     if (0 == zret) {
       // Walk the returned addresses and pick the "best".
       enum {
@@ -420,7 +489,7 @@ ats_ip_getbestaddrinfo(char const* host,
         else if (ats_is_ip_private(ai_ip)) spot_type = PR;
         else if (ats_is_ip_multicast(ai_ip)) spot_type = MC;
         else spot_type = GL;
-        
+
         if (spot_type == NA) continue; // Next!
 
         if (ats_is_ip4(ai_ip)) {
@@ -474,7 +543,7 @@ ats_ip_check_characters(ts::ConstBuffer text) {
 }
 
 // Need to declare this type globally so gcc 4.4 can use it in the countof() template ...
-struct ip_parse_spec { const char * hostspec; const char * host; const char * port; };
+struct ip_parse_spec { char const* hostspec; char const* host; char const* port; char const* rest;};
 
 REGRESSION_TEST(Ink_Inet) (RegressionTest * t, int /* atype */, int * pstatus) {
   TestBox box(t, pstatus);
@@ -486,28 +555,47 @@ REGRESSION_TEST(Ink_Inet) (RegressionTest * t, int /* atype */, int * pstatus) {
   // Test ats_ip_parse() ...
   {
     struct ip_parse_spec names[] = {
-      { "::", "::", NULL },
-      { "[::1]:99", "::1", "99" },
-      { "127.0.0.1:8080", "127.0.0.1", "8080" },
-      { "foo.example.com", "foo.example.com", NULL },
-      { "foo.example.com:99", "foo.example.com", "99" },
+      { "::", "::", NULL, NULL },
+      { "[::1]:99", "::1", "99", NULL },
+      { "127.0.0.1:8080", "127.0.0.1", "8080", NULL },
+      { "127.0.0.1:8080-Bob", "127.0.0.1", "8080", "-Bob" },
+      { "127.0.0.1:", "127.0.0.1", NULL, ":" },
+      { "foo.example.com", "foo.example.com", NULL, NULL },
+      { "foo.example.com:99", "foo.example.com", "99", NULL },
+      { "ffee::24c3:3349:3cee:0143", "ffee::24c3:3349:3cee:0143", NULL },
+      { "fe80:88b5:4a:20c:29ff:feae:1c33:8080", "fe80:88b5:4a:20c:29ff:feae:1c33:8080", NULL, NULL },
+      { "[ffee::24c3:3349:3cee:0143]", "ffee::24c3:3349:3cee:0143", NULL },
+      { "[ffee::24c3:3349:3cee:0143]:80", "ffee::24c3:3349:3cee:0143", "80", NULL },
+      { "[ffee::24c3:3349:3cee:0143]:8080x", "ffee::24c3:3349:3cee:0143", "8080", "x" }
     };
 
     for (unsigned i = 0; i < countof(names); ++i) {
-      ts::ConstBuffer addr, port;
+      ip_parse_spec const& s = names[i];
+      ts::ConstBuffer host, port, rest;
+      size_t len;
 
-      box.check(ats_ip_parse(ts::ConstBuffer(names[i].hostspec, strlen(names[i].hostspec)), &addr, &port) == 0,
-          "ats_ip_parse(%s)", names[i].hostspec);
-      box.check(strncmp(addr.data(), names[i].host, addr.size()) ==  0,
-          "ats_ip_parse(%s) gave addr '%.*s'", names[i].hostspec, addr.size(), addr.data());
-      if (names[i].port) {
-        box.check(strncmp(port.data(), names[i].port, port.size()) ==  0,
-          "ats_ip_parse(%s) gave port '%.*s'", names[i].hostspec, port.size(), port.data());
+      box.check(ats_ip_parse(ts::ConstBuffer(s.hostspec, strlen(s.hostspec)), &host, &port, &rest) == 0,
+                "ats_ip_parse(%s)", s.hostspec);
+      len = strlen(s.host);
+      box.check(len == host.size() && strncmp(host.data(), s.host, host.size()) ==  0,
+                "ats_ip_parse(%s) gave addr '%.*s'", s.hostspec, static_cast<int>(host.size()), host.data());
+      if (s.port) {
+        len = strlen(s.port);
+        box.check(len == port.size() && strncmp(port.data(), s.port, port.size()) ==  0,
+                  "ats_ip_parse(%s) gave port '%.*s'", s.hostspec, static_cast<int>(port.size()), port.data());
       } else {
         box.check(port.size() == 0,
-          "ats_ip_parse(%s) gave port '%.*s'", names[i].hostspec, port.size(), port.data());
+                  "ats_ip_parse(%s) gave port '%.*s' instead of empty", s.hostspec, static_cast<int>(port.size()), port.data());
       }
 
+      if (s.rest) {
+        len = strlen(s.rest);
+        box.check(len == rest.size() && strncmp(rest.data(), s.rest, len) == 0
+                  , "ats_ip_parse(%s) gave rest '%.*s' instead of '%s'", s.hostspec, static_cast<int>(rest.size()), rest.data(), s.rest);
+      } else {
+        box.check(rest.size() == 0,
+                  "ats_ip_parse(%s) gave rest '%.*s' instead of empty", s.hostspec, static_cast<int>(rest.size()), rest.data());
+      }
     }
   }
 
@@ -528,6 +616,4 @@ REGRESSION_TEST(Ink_Inet) (RegressionTest * t, int /* atype */, int * pstatus) {
       ;
     }
   }
-
-
 }

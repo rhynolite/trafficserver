@@ -46,11 +46,12 @@ struct md5_key {
 
   md5_key() {}
 
-  md5_key(const std::string& str, unsigned i) {
+  md5_key(const BalancerTarget& target, unsigned i) {
     MD5_CTX ctx;
 
     MD5_Init(&ctx);
-    MD5_Update(&ctx, str.data(), str.size());
+    MD5_Update(&ctx, target.name.data(), target.name.size());
+    MD5_Update(&ctx, &target.port, sizeof(target.port));
     MD5_Update(&ctx, &i, sizeof(i));
     MD5_Final(this->key, &ctx);
   }
@@ -64,14 +65,27 @@ struct md5_key {
 
 typedef void (*HashComponent)(TSHttpTxn txn, TSRemapRequestInfo *, MD5_CTX *);
 
-// Hash on the source IP address;
+// Hash on the source (client) IP address.
 void
 HashTxnSrcaddr(TSHttpTxn txn, TSRemapRequestInfo *, MD5_CTX * ctx)
 {
   struct sockaddr const * sa;
 
+  sa = TSHttpTxnClientAddrGet(txn);
+  if (sa) {
+    MD5_Update(ctx, sa, sockaddrlen(sa));
+    TSDebug("balancer", "%s(addr[%zu]]", __func__, sockaddrlen(sa));
+  }
+}
+
+// Hash on the destination (server) IP address;
+void
+HashTxnDstaddr(TSHttpTxn txn, TSRemapRequestInfo *, MD5_CTX * ctx)
+{
+  struct sockaddr const * sa;
+
   sa = TSHttpTxnIncomingAddrGet(txn);
-  if (txn) {
+  if (sa) {
     MD5_Update(ctx, sa, sockaddrlen(sa));
     TSDebug("balancer", "%s(addr[%zu]]", __func__, sockaddrlen(sa));
   }
@@ -126,8 +140,8 @@ done:
 
 struct HashBalancer : public BalancerInstance
 {
-  typedef std::map<md5_key, std::string>  hash_ring_type;
-  typedef std::vector<HashComponent>      hash_part_type;
+  typedef std::map<md5_key, BalancerTarget> hash_ring_type;
+  typedef std::vector<HashComponent>        hash_part_type;
 
   enum { iterations = 10 };
 
@@ -135,13 +149,13 @@ struct HashBalancer : public BalancerInstance
     this->hash_parts.push_back(HashTxnUrl);
   }
 
-  void push_target(const char * target) {
+  void push_target(const BalancerTarget& target) {
     for (unsigned i = 0; i < iterations; ++i) {
       this->hash_ring.insert(std::make_pair(md5_key(target, i), target));
     }
   }
 
-  const char * balance(TSHttpTxn txn, TSRemapRequestInfo * rri) {
+  const BalancerTarget& balance(TSHttpTxn txn, TSRemapRequestInfo * rri) {
     md5_key key;
     MD5_CTX ctx;
     hash_ring_type::const_iterator loc;
@@ -166,7 +180,7 @@ struct HashBalancer : public BalancerInstance
       loc = this->hash_ring.begin();
     }
 
-    return loc->second.c_str();
+    return loc->second;
   }
 
   hash_ring_type hash_ring;
@@ -194,6 +208,8 @@ MakeHashBalancer(const char * options)
         hash->hash_parts.push_back(HashTxnUrl);
       } else if (strcmp(opt, "srcaddr") == 0) {
         hash->hash_parts.push_back(HashTxnSrcaddr);
+      } else if (strcmp(opt, "dstaddr") == 0) {
+        hash->hash_parts.push_back(HashTxnDstaddr);
       } else {
         TSError("balancer: ignoring invalid hash field '%s'", opt);
       }

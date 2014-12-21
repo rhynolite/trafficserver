@@ -38,6 +38,8 @@
 #include "TextBuffer.h"
 #include "List.h"
 
+class FileManager;
+
 #define ACTIVE_VERSION 0
 #define INVALID_VERSION -1
 
@@ -55,6 +57,12 @@ enum RollBackCodes
 { OK_ROLLBACK, FILE_NOT_FOUND_ROLLBACK,
   VERSION_NOT_CURRENT_ROLLBACK, SYS_CALL_ERROR_ROLLBACK,
   INVALID_VERSION_ROLLBACK
+};
+
+enum RollBackCheckType
+{
+  ROLLBACK_CHECK_AND_UPDATE,
+  ROLLBACK_CHECK_ONLY
 };
 
 class ExpandingArray;
@@ -172,7 +180,7 @@ public:
   version_t extractVersionInfo(ExpandingArray * listNames, const char *testFileName);
 
   // Automatically take out lock
-  bool checkForUserUpdate();
+  bool checkForUserUpdate(RollBackCheckType);
   RollBackCodes removeVersion(version_t version);
   RollBackCodes revertToVersion(version_t version);
   RollBackCodes getVersion(version_t version, textBuffer ** buffer);
@@ -199,6 +207,8 @@ public:
   {
     return fileName;
   };
+
+  FileManager * configFiles; // Manager to notify on an update.
 
 private:
   Rollback(const Rollback &);

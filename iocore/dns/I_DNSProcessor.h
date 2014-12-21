@@ -53,9 +53,9 @@ struct HostEnt : RefCountObj {
 
   virtual void free();
 
-  HostEnt() { 
+  HostEnt() {
     size_t base = sizeof(force_VFPT_to_top);  // preserve VFPT
-    memset(((char*)this) + base, 0, sizeof(*this) - base); 
+    memset(((char*)this) + base, 0, sizeof(*this) - base);
   }
 };
 
@@ -122,7 +122,7 @@ struct DNSProcessor: public Processor
 
   // Open/close a link to a 'named' (done in start())
   //
-  void open(sockaddr const* ns = 0, int options = _res.options);
+  void open(sockaddr const* ns = 0);
 
   DNSProcessor();
 

@@ -208,24 +208,25 @@ sub get_stat {
     $self->{_socket}->print(pack("sla*", TS_RECORD_GET, length($stat)), $stat);
     $res = $self->_do_read();
 
-    my @resp = unpack("sls", $res);
-    return undef unless (scalar(@resp) == 3);
+    my @resp = unpack("slls", $res);
+    return undef unless (scalar(@resp) == 4);
 
     if ($resp[0] == TS_ERR_OKAY) {
-        if ($resp[2] < TS_REC_FLOAT) {
-            @resp = unpack("slsq", $res);
-            return undef unless (scalar(@resp) == 4);
-            return int($resp[3]);
+        if ($resp[3] < TS_REC_FLOAT) {
+            @resp = unpack("sllsq", $res);
+            return undef unless (scalar(@resp) == 5);
+            return int($resp[4]);
         }
-        elsif ($resp[2] == TS_REC_FLOAT) {
-            @resp = unpack("slsf", $res);
-            return undef unless (scalar(@resp) == 4);
-            return $resp[3];
+        elsif ($resp[3] == TS_REC_FLOAT) {
+            @resp = unpack("sllsf", $res);
+            return undef unless (scalar(@resp) == 5);
+            return $resp[4];
         }
-        elsif ($resp[2] == TS_REC_STRING) {
-            @resp = unpack("slsa*", $res);
-            return undef unless (scalar(@resp) == 4);
-            return $resp[3];
+        elsif ($resp[3] == TS_REC_STRING) {
+            @resp = unpack("sllsa*", $res);
+            return undef unless (scalar(@resp) == 5);
+	    my @result = split($stat, $resp[4]);
+            return $result[0];
         }
     }
 
@@ -343,7 +344,6 @@ The Apache Traffic Server Administration Manual will explain what these strings 
  proxy.config.cache.storage_filename
  proxy.config.cache.threads_per_disk
  proxy.config.cache.url_hash_method
- proxy.config.cache.vary_on_user_agent
  proxy.config.cache.mutex_retry_delay
  proxy.config.cluster.cluster_configuration
  proxy.config.cluster.cluster_load_clear_duration
@@ -464,11 +464,11 @@ The Apache Traffic Server Administration Manual will explain what these strings 
  proxy.config.http.cache.max_stale_age
  proxy.config.http.cache.open_read_retry_time
  proxy.config.http.cache.range.lookup
+ proxy.config.http.cache.range.write
  proxy.config.http.cache.required_headers
  proxy.config.http.cache.vary_default_images
  proxy.config.http.cache.vary_default_other
  proxy.config.http.cache.vary_default_text
- proxy.config.http.cache.when_to_add_no_cache_to_msie_requests
  proxy.config.http.cache.when_to_revalidate
  proxy.config.http.chunking_enabled
  proxy.config.http.congestion_control.default.client_wait_interval
@@ -535,7 +535,6 @@ The Apache Traffic Server Administration Manual will explain what these strings 
  proxy.config.http.push_method_enabled
  proxy.config.http.quick_filter.mask
  proxy.config.http.record_heartbeat
- proxy.config.http.record_tcp_mem_hit
  proxy.config.http.redirection_enabled
  proxy.config.http.referer_default_redirect
  proxy.config.http.referer_filter
@@ -631,7 +630,6 @@ The Apache Traffic Server Administration Manual will explain what these strings 
  proxy.config.manager_binary
  proxy.config.net.connections_throttle
  proxy.config.net.listen_backlog
- proxy.config.net_snapshot_filename
  proxy.config.net.sock_mss_in
  proxy.config.net.sock_option_flag_in
  proxy.config.net.sock_option_flag_out
@@ -644,7 +642,6 @@ The Apache Traffic Server Administration Manual will explain what these strings 
  proxy.config.ping.npacks_to_trans
  proxy.config.ping.timeout_sec
  proxy.config.plugin.plugin_dir
- proxy.config.plugin.plugin_mgmt_dir
  proxy.config.prefetch.child_port
  proxy.config.prefetch.config_file
  proxy.config.prefetch.default_data_proto
@@ -703,6 +700,7 @@ The Apache Traffic Server Administration Manual will explain what these strings 
  proxy.config.ssl.server.cert.path
  proxy.config.ssl.server.cipher_suite
  proxy.config.ssl.server.honor_cipher_order
+ proxy.config.ssl.server.dhparams_file
  proxy.config.ssl.SSLv2
  proxy.config.ssl.SSLv3
  proxy.config.ssl.TLSv1
@@ -710,7 +708,6 @@ The Apache Traffic Server Administration Manual will explain what these strings 
  proxy.config.ssl.server.multicert.filename
  proxy.config.ssl.server_port
  proxy.config.ssl.server.private_key.path
- proxy.config.stack_dump_enabled
  proxy.config.stat_collector.interval
  proxy.config.stat_collector.port
  proxy.config.stats.config_file
@@ -718,6 +715,7 @@ The Apache Traffic Server Administration Manual will explain what these strings 
  proxy.config.stats.snap_frequency
  proxy.config.syslog_facility
  proxy.config.system.mmap_max
+ proxy.config.system.file_max_pct
  proxy.config.thread.default.stacksize
  proxy.config.udp.free_cancelled_pkts_sec
  proxy.config.udp.periodic_cleanup

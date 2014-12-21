@@ -207,11 +207,10 @@ DNSProcessor::start(int, size_t stacksize) {
 }
 
 void
-DNSProcessor::open(sockaddr const* target, int aoptions)
+DNSProcessor::open(sockaddr const* target)
 {
-  DNSHandler *h = NEW(new DNSHandler);
+  DNSHandler *h = new DNSHandler;
 
-  h->options = aoptions;
   h->mutex = thread->mutex;
   h->m_res = &l_res;
   ats_ip_copy(&h->local_ipv4.sa, &local_ipv4.sa);
@@ -920,7 +919,7 @@ DNSHandler::get_query_id()
   q2 = q1 = (uint16_t)(generator.random() & 0xFFFF);
   if (query_id_in_use(q2)) {
     uint16_t i = q2>>6;
-    while (qid_in_flight[i] == INTU64_MAX) {
+    while (qid_in_flight[i] == UINT64_MAX) {
       if (++i ==  sizeof(qid_in_flight)/sizeof(uint64_t)) {
         i = 0;
       }
@@ -1098,7 +1097,7 @@ DNSProcessor::getby(const char *x, int len, int type, Continuation *cont, Option
   e->retries = dns_retries;
   e->init(x, len, type, cont, opt);
   MUTEX_TRY_LOCK(lock, e->mutex, this_ethread());
-  if (!lock)
+  if (!lock.is_locked())
     thread->schedule_imm(e);
   else
     e->handleEvent(EVENT_IMMEDIATE, 0);
@@ -1210,7 +1209,7 @@ dns_result(DNSHandler *h, DNSEntry *e, HostEnt *ent, bool retry) {
 
   if (h->mutex->thread_holding == e->submit_thread) {
     MUTEX_TRY_LOCK(lock, e->action.mutex, h->mutex->thread_holding);
-    if (!lock) {
+    if (!lock.is_locked()) {
       Debug("dns", "failed lock for result %s", e->qname);
       goto Lretry;
     }
@@ -1249,7 +1248,7 @@ DNSEntry::post(DNSHandler *h, HostEnt *ent)
   result_ent = ent;
   if (h->mutex->thread_holding == submit_thread) {
     MUTEX_TRY_LOCK(lock, action.mutex, h->mutex->thread_holding);
-    if (!lock) {
+    if (!lock.is_locked()) {
       Debug("dns", "failed lock for result %s", qname);
       return 1;
     }
@@ -1714,7 +1713,7 @@ static const char *dns_test_hosts[] = {
 };
 
 REGRESSION_TEST(DNS) (RegressionTest *t, int atype, int *pstatus) {
-  eventProcessor.schedule_in(NEW(new DNSRegressionContinuation(4, 4, dns_test_hosts, t, atype, pstatus)),
+  eventProcessor.schedule_in(new DNSRegressionContinuation(4, 4, dns_test_hosts, t, atype, pstatus),
                              HRTIME_SECONDS(1));
 }
 

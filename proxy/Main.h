@@ -70,14 +70,15 @@ extern int default_rcvbuf_size;
 //
 // Functions
 //
-void shutdown_system();
 inline bool
 maintainance_mode()
 {
   return (command_flag ? true : false);
 }
 
-extern const Version version;
 extern AppVersionInfo appVersionInfo;
+
+void crash_logger_init();
+void crash_logger_invoke(int signo, siginfo_t * info, void * ctx);
 
 #endif /* _Main_h_ */

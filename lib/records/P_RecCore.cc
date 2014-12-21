@@ -113,7 +113,7 @@ send_push_message()
     if (i_am_the_record_owner(r->rec_type)) {
       if (r->sync_required & REC_PEER_SYNC_REQUIRED) {
         m = RecMessageMarshal_Realloc(m, r);
-        r->sync_required = r->sync_required & ~REC_PEER_SYNC_REQUIRED;
+        r->sync_required &= ~REC_PEER_SYNC_REQUIRED;
         send_msg = true;
       }
     }
@@ -157,10 +157,10 @@ send_pull_message(RecMessageT msg_type)
       r = &(g_records[i]);
       if (i_am_the_record_owner(r->rec_type) ||
           (REC_TYPE_IS_STAT(r->rec_type) && !(r->registered)) ||
-          (REC_TYPE_IS_STAT(r->rec_type) && !(r->stat_meta.persist_type != RECP_NON_PERSISTENT))) {
+          (REC_TYPE_IS_STAT(r->rec_type) && (r->stat_meta.persist_type == RECP_NON_PERSISTENT))) {
         rec_mutex_acquire(&(r->lock));
         m = RecMessageMarshal_Realloc(m, r);
-        r->sync_required = r->sync_required & ~REC_PEER_SYNC_REQUIRED;
+        r->sync_required &= ~REC_PEER_SYNC_REQUIRED;
         rec_mutex_release(&(r->lock));
       }
     }
@@ -534,7 +534,7 @@ RecReadStatsFile()
   RecMessage *m;
   RecMessageItr itr;
   RecPersistT persist_type = RECP_NULL;
-  xptr<char> snap_fpath(RecConfigReadPersistentStatsPath());
+  ats_scoped_str snap_fpath(RecConfigReadPersistentStatsPath());
 
   // lock our hash table
   ink_rwlock_wrlock(&g_records_rwlock);
@@ -591,7 +591,7 @@ RecSyncStatsFile()
   RecMessage *m;
   int i, num_records;
   bool sync_to_disk;
-  xptr<char> snap_fpath(RecConfigReadPersistentStatsPath());
+  ats_scoped_str snap_fpath(RecConfigReadPersistentStatsPath());
 
   /*
    * g_mode_type should be initialized by
@@ -796,13 +796,14 @@ RecSyncConfigToTB(textBuffer * tb, bool *inc_version)
 
 
 //-------------------------------------------------------------------------
-// RecExecConifgUpdateCbs
+// RecExecConfigUpdateCbs
 //-------------------------------------------------------------------------
-int
+RecUpdateT
 RecExecConfigUpdateCbs(unsigned int update_required_type)
 {
   RecRecord *r;
   int i, num_records;
+  RecUpdateT update_type = RECU_NULL;
 
   num_records = g_num_records;
   for (i = 0; i < num_records; i++) {
@@ -819,6 +820,12 @@ RecExecConfigUpdateCbs(unsigned int update_required_type)
          }
        */
 
+      if (r->config_meta.update_required) {
+        if (r->config_meta.update_type > update_type) {
+          update_type = r->config_meta.update_type;
+        }
+      }
+
       if ((r->config_meta.update_required & update_required_type) && (r->config_meta.update_cb_list)) {
         RecConfigUpdateCbList *cur_callback = NULL;
         for (cur_callback = r->config_meta.update_cb_list; cur_callback; cur_callback = cur_callback->next) {
@@ -830,7 +837,7 @@ RecExecConfigUpdateCbs(unsigned int update_required_type)
     rec_mutex_release(&(r->lock));
   }
 
-  return REC_ERR_OKAY;
+  return update_type;
 }
 
 
@@ -1001,7 +1008,7 @@ int RecWriteConfigFile(textBuffer *tb)
       break;
     }
 
-    if (nbytes != tb->spaceUsed()) {
+    if (nbytes != (int)tb->spaceUsed()) {
       RecLog(DL_Warning, "write to file: %s fail, disk maybe full", tmp_filename);
       result = REC_ERR_FAIL;
       break;

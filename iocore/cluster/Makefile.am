@@ -18,6 +18,7 @@
 
 AM_CPPFLAGS = \
   $(iocore_include_dirs) \
+  -I$(top_builddir)/lib \
   -I$(top_srcdir)/lib \
   -I$(top_srcdir)/lib/records \
   -I$(top_srcdir)/lib/ts \
@@ -26,7 +27,6 @@ AM_CPPFLAGS = \
   -I$(top_srcdir)/proxy/api/ts \
   -I$(top_srcdir)/proxy \
   -I$(top_srcdir)/mgmt \
-  -I$(top_srcdir)/mgmt/preparse \
   -I$(top_srcdir)/mgmt/utils
 
 noinst_LIBRARIES = libinkcluster.a

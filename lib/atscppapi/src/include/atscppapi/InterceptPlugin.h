@@ -68,6 +68,9 @@ public:
    */
   virtual void handleInputComplete() = 0;
 
+  /** Should be called only after request header has completely been consumed */
+  Headers &getRequestHeaders();
+
   virtual ~InterceptPlugin();
 
   struct State; /** Internal use only */
@@ -85,7 +88,7 @@ protected:
 
 private:
   State *state_;
-  
+
   bool doRead();
   void handleEvent(int, void *);
 

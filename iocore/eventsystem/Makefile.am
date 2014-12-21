@@ -67,11 +67,12 @@ libinkevent_a_SOURCES = \
   Thread.cc \
   UnixEThread.cc \
   UnixEvent.cc \
-  UnixEventProcessor.cc 
+  UnixEventProcessor.cc
 
 check_PROGRAMS = test_Buffer test_Event
 
 test_CXXFLAGS = \
+  @OPENSSL_INCLUDES@ \
   $(iocore_include_dirs) \
   -I$(top_srcdir)/proxy/api/ts \
   -I$(top_srcdir)/proxy/api \
@@ -83,14 +84,16 @@ test_CXXFLAGS = \
   -I$(top_srcdir)/mgmt/utils
 
 test_LDADD = \
+  @LIBTOOL_LINK_FLAGS@ \
+  @OPENSSL_LIBS@ \
+  @OPENSSL_LDFLAGS@ \
   libinkevent.a \
-  $(top_builddir)/lib/records/librecprocess.a \
-  $(top_builddir)/mgmt/libmgmt_p.a \
-  $(top_builddir)/mgmt/utils/libutils_p.a \
+  $(top_builddir)/lib/records/librecords_p.a \
+  $(top_builddir)/mgmt/libmgmt_p.la \
   $(top_builddir)/iocore/eventsystem/libinkevent.a \
   $(top_builddir)/lib/ts/libtsutil.la \
   $(top_builddir)/proxy/shared/libUglyLogStubs.a \
-  @LIBTCL@
+  @LIBTCL@ @HWLOC_LIBS@
 
 test_Buffer_SOURCES = \
   test_Buffer.cc

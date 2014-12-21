@@ -5,9 +5,9 @@
   to you under the Apache License, Version 2.0 (the
   "License"); you may not use this file except in compliance
   with the License.  You may obtain a copy of the License at
- 
+
    http://www.apache.org/licenses/LICENSE-2.0
- 
+
   Unless required by applicable law or agreed to in writing,
   software distributed under the License is distributed on an
   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -103,10 +103,10 @@ The following list shows ``LogFormat`` specifications.
     -  FIRST
     -  LAST
 
-.. _LogFilters:
+.. _LogFilter:
 
-LogFilters
-==========
+LogFilter
+=========
 
 The following list shows the ``LogFilter`` specifications.
 
@@ -138,6 +138,10 @@ The following list shows the ``LogFilter`` specifications.
     field type. For integer values, all of the operators are equivalent
     and mean that the field must be equal to the specified value.
 
+   For IP address fields, this can be a list of IP addresses and include ranges. A range is an IP address, followed by a
+   dash '``-``', and then another IP address of the same family. For instance, the 10/8 network can be represented by
+   ``10.0.0.0-10.255.255.255``. Currently network specifiers are not supported.
+
 .. note::
 
     There are no negative comparison operators. If you want to
@@ -145,9 +149,15 @@ The following list shows the ``LogFilter`` specifications.
     ``REJECT`` the record.
 
 ``<Action = "valid_action_field"/>``
-    Required: ``ACCEPT`` or ``REJECT`` .
-    This instructs Traffic Server to either accept or reject records
-    that satisfy the filter condition.
+    Required: ``ACCEPT`` or ``REJECT`` or ``WIPE_FIELD_VALUE``.
+    ACCEPT or REJECT instructs Traffic Server to either accept or reject records
+    that satisfy the filter condition. WIPE_FIELD_VALUE wipes out
+    the values of the query params in the url fields specified in the Condition.
+
+NOTES: 1. WIPE_FIELD_VALUE action is only applied to the parameters in the query part.
+       2. Multiple parameters can be listed in a single WIPE_FIELD_VALUE filter
+       3. If the same parameter appears more than once in the query part , only
+          the value of the first occurance is wiped
 
 .. _LogObject:
 
@@ -227,15 +237,15 @@ The following list shows the ``LogObject`` specifications.
 
 ``<CollationHosts = "list_of_valid_hostnames:port|failover hosts"/>``
     Optional
-    A comma-separated list of collation servers (with pipe delimited 
-    failover servers) to which all log entries (for this object) are 
-    forwarded. Collation servers can be specified by name or IP address. 
-    Specify the collation port with a colon after the name. For example, 
-    in ``host1:5000|failhostA:5000|failhostB:6000, host2:6000`` logs 
-    would be sent to host1 and host2, with failhostA and failhostB 
-    acting as failover hosts for host1. When host1 disconnects, 
-    logs would be sent to failhostA. If failhostA disconnects, log 
-    entries would be sent to failhostB until host1 or failhostA comes 
+    A comma-separated list of collation servers (with pipe delimited
+    failover servers) to which all log entries (for this object) are
+    forwarded. Collation servers can be specified by name or IP address.
+    Specify the collation port with a colon after the name. For example,
+    in ``host1:5000|failhostA:5000|failhostB:6000, host2:6000`` logs
+    would be sent to host1 and host2, with failhostA and failhostB
+    acting as failover hosts for host1. When host1 disconnects,
+    logs would be sent to failhostA. If failhostA disconnects, log
+    entries would be sent to failhostB until host1 or failhostA comes
     back. Logs would also be sent to host2.
 
 ``<Header = "header"/>``
@@ -330,6 +340,15 @@ The following is an example of a ``LogFilter`` that will cause only
              <Action = "ACCEPT"/>
              <Condition = "pssc MATCH REFRESH_HIT"/>
          </LogFilter>
+
+The following is an example of a ``LogFilter`` that will cause the value of
+passwd field be wiped in cquc
+
+<LogFilter>
+    <Name = "wipe_password"/>
+    <Condition = "cquc CONTAIN passwd"/>
+    <Action = "WIPE_FIELD_VALUE"/>
+</LogFilter>
 
 The following is an example of a ``LogObject`` specification that
 creates a local log file for the minimal format defined earlier. The log

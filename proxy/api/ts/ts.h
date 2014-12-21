@@ -309,7 +309,7 @@ extern "C"
 
    */
   /** @deprecated There is no reason to destroy the URL, just release
-      the marshal buffers. */
+      the marshal buffers. Should be removed for v5.0.0 */
   tsapi TS_DEPRECATED TSReturnCode TSUrlDestroy(TSMBuffer bufp, TSMLoc offset);
 
   /**
@@ -1015,6 +1015,7 @@ extern "C"
 
   tsapi TSReturnCode TSMimeHdrFieldValueAppend(TSMBuffer bufp, TSMLoc hdr, TSMLoc field, int idx,
                                                   const char* value, int length);
+  /* These Insert() APIs should be considered. Use the corresponding Set() API instead */
   tsapi TSReturnCode TSMimeHdrFieldValueStringInsert(TSMBuffer bufp, TSMLoc hdr, TSMLoc field, int idx,
                                                         const char* value, int length);
   tsapi TSReturnCode TSMimeHdrFieldValueIntInsert(TSMBuffer bufp, TSMLoc hdr, TSMLoc field, int idx, int value);
@@ -1108,6 +1109,7 @@ extern "C"
 
   tsapi const char* TSHttpHdrMethodGet(TSMBuffer bufp, TSMLoc offset, int* length);
   tsapi TSReturnCode TSHttpHdrMethodSet(TSMBuffer bufp, TSMLoc offset, const char* value, int length);
+  tsapi const char* TSHttpHdrHostGet(TSMBuffer bufp, TSMLoc offset, int* length);
   tsapi TSReturnCode TSHttpHdrUrlGet(TSMBuffer bufp, TSMLoc offset, TSMLoc* locp);
   tsapi TSReturnCode TSHttpHdrUrlSet(TSMBuffer bufp, TSMLoc offset, TSMLoc url);
 
@@ -1127,6 +1129,7 @@ extern "C"
   /* --------------------------------------------------------------------------
      Mutexes */
   tsapi TSMutex TSMutexCreate(void);
+  tsapi void TSMutexDestroy(TSMutex mutexp);
   tsapi void TSMutexLock(TSMutex mutexp);
   tsapi TSReturnCode TSMutexLockTry(TSMutex mutexp);
 
@@ -1220,6 +1223,21 @@ extern "C"
   tsapi void TSHttpSsnHookAdd(TSHttpSsn ssnp, TSHttpHookID id, TSCont contp);
   tsapi void TSHttpSsnReenable(TSHttpSsn ssnp, TSEvent event);
   tsapi int TSHttpSsnTransactionCount(TSHttpSsn ssnp);
+
+  /* --------------------------------------------------------------------------
+     SSL connections */
+  /// Re-enable an SSL connection from a hook.
+  /// This must be called exactly once before the SSL connection will resume.
+  tsapi void TSVConnReenable(TSVConn sslvcp);
+  /// Set the connection to go into blind tunnel mode
+  tsapi TSReturnCode TSVConnTunnel(TSVConn sslp);
+  // Return the SSL object associated with the connection
+  tsapi TSSslConnection TSVConnSSLConnectionGet(TSVConn sslp);
+  // Fetch a SSL context from the global lookup table
+  tsapi TSSslContext TSSslContextFindByName(const char *name);
+  tsapi TSSslContext TSSslContextFindByAddr(struct sockaddr const*);
+  // Returns 1 if the sslp argument refers to a SSL connection
+  tsapi int TSVConnIsSsl(TSVConn sslp);
 
   /* --------------------------------------------------------------------------
      HTTP transactions */
@@ -1352,49 +1370,62 @@ extern "C"
   /** Change packet firewall mark for the client side connection
    *
       @note The change takes effect immediately
-      
+
       @return TS_SUCCESS if the client connection was modified
   */
   tsapi TSReturnCode TSHttpTxnClientPacketMarkSet(TSHttpTxn txnp, int mark);
-  
+
   /** Change packet firewall mark for the server side connection
    *
       @note The change takes effect immediately, if no OS connection has been
       made, then this sets the mark that will be used IF an OS connection
       is established
-      
+
       @return TS_SUCCESS if the (future?) server connection was modified
   */
   tsapi TSReturnCode TSHttpTxnServerPacketMarkSet(TSHttpTxn txnp, int mark);
-  
+
   /** Change packet TOS for the client side connection
    *
       @note The change takes effect immediately
-      
+
       @note TOS is deprecated and replaced by DSCP, this is still used to
       set DSCP however the first 2 bits of this value will be ignored as
       they now belong to the ECN field.
-      
+
       @return TS_SUCCESS if the client connection was modified
   */
   tsapi TSReturnCode TSHttpTxnClientPacketTosSet(TSHttpTxn txnp, int tos);
-  
+
   /** Change packet TOS for the server side connection
    *
+
       @note The change takes effect immediately, if no OS connection has been
       made, then this sets the mark that will be used IF an OS connection
       is established
-      
+
       @note TOS is deprecated and replaced by DSCP, this is still used to
       set DSCP however the first 2 bits of this value will be ignored as
       they now belong to the ECN field.
-      
+
       @return TS_SUCCESS if the (future?) server connection was modified
   */
   tsapi TSReturnCode TSHttpTxnServerPacketTosSet(TSHttpTxn txnp, int tos);
 
 
-  tsapi void TSHttpTxnErrorBodySet(TSHttpTxn txnp, char* buf, int buflength, char* mimetype);
+  /**
+     Sets an error type body to a transaction. Note that both string arguments
+     must be allocated with TSmalloc() or TSstrdup(). The mimetype argument is
+     optional, if not provided it defaults to "text/html". Sending an emptry
+     string would prevent setting a content type header (but that is not adviced).
+
+     @param txnp HTTP transaction whose parent proxy to get.
+     @param buf The body message (must be heap allocated).
+     @param buflength Length of the body message.
+     @param mimetype The MIME type to set the response to (can be NULL, but must
+            be heap allocated if non-NULL).
+  */
+  tsapi void TSHttpTxnErrorBodySet(TSHttpTxn txnp, char* buf, size_t buflength, char* mimetype);
 
   /**
       Retrieves the parent proxy hostname and port, if parent
@@ -1444,7 +1475,6 @@ extern "C"
    */
   tsapi void TSHttpTxnReenable(TSHttpTxn txnp, TSEvent event);
   tsapi TSReturnCode TSHttpCacheReenable(TSCacheTxn txnp, const TSEvent event, const void* data, const uint64_t size);
-  tsapi TSReturnCode TSHttpTxnFollowRedirect(TSHttpTxn txnp, int on);
 
   tsapi void TSHttpTxnArgSet(TSHttpTxn txnp, int arg_idx, void* arg);
   tsapi void* TSHttpTxnArgGet(TSHttpTxn txnp, int arg_idx);
@@ -1458,8 +1488,7 @@ extern "C"
   tsapi TSReturnCode TSHttpArgIndexNameLookup(const char* name, int* arg_idx, const char** description);
   tsapi TSReturnCode TSHttpArgIndexLookup(int arg_idx, const char** name, const char** description);
 
-  tsapi int TSHttpTxnGetMaxHttpRetBodySize(void);
-  tsapi void TSHttpTxnSetHttpRetBody(TSHttpTxn txnp, const char* body_msg, int plain_msg);
+  /* ToDo: This is a leftover from olden days, can we eliminate? */
   tsapi void TSHttpTxnSetHttpRetStatus(TSHttpTxn txnp, TSHttpStatus http_retstatus);
 
   tsapi void TSHttpTxnActiveTimeoutSet(TSHttpTxn txnp, int timeout);
@@ -1566,6 +1595,7 @@ extern "C"
 
   /* --------------------------------------------------------------------------
      Initiate Http Connection */
+
   /**
       Allows the plugin to initiate an http connection. The TSVConn the
       plugin receives as the result of successful operates identically to
@@ -1576,17 +1606,18 @@ extern "C"
       than TSNetConnect() to localhost since it avoids the overhead of
       passing the data through the operating system.
 
-      @param log_ip ip address (in network byte order) that connection
-        will be logged as coming from.
-      @param log_port port (in network byte order) that connection will
-        be logged as coming from.
-      @param vc will be set to point to the new TSVConn on success.
+      This returns a VConn that connected to the transaction.
 
+      @param addr Target address of the origin server.
+      @param tag A logging tag that can be accessed via the pitag field. May be @c NULL.
+      @param id A logging id that can be access via the piid field.
+   */
+  tsapi TSVConn TSHttpConnectWithPluginId(struct sockaddr const* addr, char const* tag, int64_t id);
+
+  /** Backwards compatible version.
+      This provides a @a tag of "plugin" and an @a id of 0.
    */
   tsapi TSVConn TSHttpConnect(struct sockaddr const* addr);
-
-  tsapi TSVConn TSHttpConnectWithProtoStack(struct sockaddr const* addr,
-                                            TSClientProtoStack proto_stack);
 
     /* --------------------------------------------------------------------------
      Initiate Transparent Http Connection */
@@ -1609,6 +1640,7 @@ extern "C"
 
   /* Check if HTTP State machine is internal or not */
   tsapi TSReturnCode TSHttpIsInternalRequest(TSHttpTxn txnp);
+  tsapi TSReturnCode TSHttpIsInternalSession(TSHttpSsn ssnp);
 
   /* --------------------------------------------------------------------------
      HTTP alternate selection */
@@ -1991,7 +2023,7 @@ extern "C"
 
   typedef void (*TSRecordDumpCb) (TSRecordType rec_type, void* edata, int registered, const char* name, TSRecordDataType data_type, TSRecordData* datum);
 
-  tsapi void TSRecordDump(TSRecordType rec_type, TSRecordDumpCb callback, void* edata);
+  tsapi void TSRecordDump(int rec_type, TSRecordDumpCb callback, void* edata);
 
   /**
 
@@ -2092,8 +2124,10 @@ extern "C"
   /**
       Enable/disable rolling.
 
+      @param rolling_enabled a valid proxy.config.log.rolling_enabled value.
+
    */
-  tsapi void TSTextLogObjectRollingEnabledSet(TSTextLogObject the_object, int rolling_enabled);
+  tsapi TSReturnCode TSTextLogObjectRollingEnabledSet(TSTextLogObject the_object, int rolling_enabled);
 
   /**
       Set the rolling interval.
@@ -2102,10 +2136,18 @@ extern "C"
   tsapi void TSTextLogObjectRollingIntervalSecSet(TSTextLogObject the_object, int rolling_interval_sec);
 
   /**
-      Set the rolling offset.
+      Set the rolling offset. rolling_offset_hr specifies the hour (between 0 and 23) when log rolling
+      should take place.
 
    */
   tsapi void TSTextLogObjectRollingOffsetHrSet(TSTextLogObject the_object, int rolling_offset_hr);
+
+  /**
+      Set the rolling size. rolling_size_mb specifies the size in MB when log rolling
+      should take place.
+
+   */
+  tsapi void TSTextLogObjectRollingSizeMbSet(TSTextLogObject the_object, int rolling_size_mb);
 
   /**
       Async disk IO read
@@ -2149,34 +2191,8 @@ extern "C"
   */
   tsapi TSReturnCode TSHttpTxnAborted(TSHttpTxn txnp);
 
-  /*
-    The reason is even if VConn is created using this API, it is
-    still useless. For example, if we do TSVConnRead(), the read
-    operation returns read_vio. If we do TSVIOReenable(read_vio),
-    it actually calls:
-
-    @code
-    void VIO::reenable() {
-    if (vc_server) vc_server->reenable(this);
-    }
-    @endcode
-
-    vc_server->reenable calls:
-
-    @code
-    VConnection::reenable(VIO);
-    @endcode
-
-    This function is virtual in VConnection.h. It is defined separately for
-    UnixNet, NTNet and CacheVConnection.
-
-    Thus, unless VConn is either NetVConnection or CacheVConnection, it can't
-    be instantiated for functions like reenable.
-
-    In addition, this function has never been used.
-
-  */
   tsapi TSVConn TSVConnCreate(TSEventFunc event_funcp, TSMutex mutexp);
+  tsapi TSVConn TSVConnFdCreate(int fd);
 
   /* api functions to access stats */
   /* ClientResp APIs exist as well and are exposed in PrivateFrozen  */
@@ -2217,11 +2233,59 @@ extern "C"
 
   tsapi TSReturnCode TSHttpTxnConfigFind(const char* name, int length, TSOverridableConfigKey* conf, TSRecordDataType* type);
 
-  /*
-    It's unclear if these actually function properly still.
+  /**
+     This API informs the core to try to follow redirections (e.g. 301 responses.
+     The new URL would be provided in the standard Location header.
+
+     @param txnp the transaction pointer
+     @param on   turn this on or off (0 or 1)
+
+     @return @c TS_SUCCESS if it succeeded
   */
-  tsapi void TSRedirectUrlSet(TSHttpTxn txnp, const char* url, const int url_len);
-  tsapi const char* TSRedirectUrlGet(TSHttpTxn txnp, int* url_len_ptr);
+  tsapi TSReturnCode TSHttpTxnFollowRedirect(TSHttpTxn txnp, int on);
+
+  /**
+     This is a generalization of the TSHttpTxnFollowRedirect(), but gives finer
+     control over the behavior. Instead of using the Location: header for the new
+     destination, this API takes the new URL as a parameter. Calling this API
+     transfers the ownership of the URL from the plugin to the core, so you must
+     make sure it is heap allocated, and that you do not free it.
+
+     Calling this API implicitly also enables the "Follow Redirect" feature, so
+     there is no reason to call TSHttpTxnFollowRedirect() as well.
+
+     @param txnp the transaction pointer
+     @param url  a heap allocated string with the URL
+     @param url_len the length of the URL
+  */
+  tsapi void TSHttpTxnRedirectUrlSet(TSHttpTxn txnp, const char* url, const int url_len);
+  //  This is deprecated as of v5.0.0.
+  tsapi TS_DEPRECATED void TSRedirectUrlSet(TSHttpTxn txnp, const char* url, const int url_len);
+
+  /**
+     Return the current (if set) redirection URL string. This is still owned by the
+     core, and must not be free'd.
+
+     @param txnp the transaction pointer
+     @param url_len_ptr a pointer to where the URL length is to be stored
+
+     @return the url string
+  */
+  tsapi const char* TSHttpTxnRedirectUrlGet(TSHttpTxn txnp, int* url_len_ptr);
+  //  This is deprecated as of v5.0.0.
+  tsapi TS_DEPRECATED const char* TSRedirectUrlGet(TSHttpTxn txnp, int* url_len_ptr);
+
+  /**
+     Return the number of redirection retries we have done. This starts off
+     at zero, and can be used to select different URLs based on which attempt this
+     is. This can be useful for example when providing a list of URLs to try, and
+     do so in order until one succeeds.
+
+     @param txnp the transaction pointer
+
+     @return the redirect try count
+  */
+  tsapi int TSHttpTxnRedirectRetries(TSHttpTxn txnp);
 
   /* Get current HTTP connection stats */
   tsapi int TSHttpCurrentClientConnectionsGet(void);

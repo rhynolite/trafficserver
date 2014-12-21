@@ -139,7 +139,7 @@ SplitDNSConfig::startup()
 
   //startup just check gsplit_dns_enabled
   REC_ReadConfigInt32(gsplit_dns_enabled, "proxy.config.dns.splitDNS.enabled");
-  splitDNSUpdate = NEW(new ConfigUpdateHandler<SplitDNSConfig>());
+  splitDNSUpdate = new ConfigUpdateHandler<SplitDNSConfig>();
   splitDNSUpdate->attach("proxy.config.cache.splitdns.filename");
 }
 
@@ -153,10 +153,10 @@ SplitDNSConfig::reconfigure()
   if (0 == gsplit_dns_enabled)
     return;
 
-  SplitDNS *params = NEW(new SplitDNS);
+  SplitDNS *params = new SplitDNS;
 
   params->m_SplitDNSlEnable = gsplit_dns_enabled;
-  params->m_DNSSrvrTable = NEW(new DNS_table("proxy.config.dns.splitdns.filename", modulePrefix, &sdns_dest_tags));
+  params->m_DNSSrvrTable = new DNS_table("proxy.config.dns.splitdns.filename", modulePrefix, &sdns_dest_tags);
 
   params->m_numEle = params->m_DNSSrvrTable->getEntryCount();
   if (0 == params->m_DNSSrvrTable || (0 == params->m_numEle)) {
@@ -526,7 +526,6 @@ SplitDNSRecord::Init(matcher_line * line_info)
 
   dnsH->m_res = res;
   dnsH->mutex = SplitDNSConfig::dnsHandler_mutex;
-  dnsH->options = res->options;
   ats_ip_invalidate(&dnsH->ip.sa); // Mark to use default DNS.
 
   m_servers.x_dnsH = dnsH;

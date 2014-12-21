@@ -84,6 +84,7 @@ namespace Gzip {
     kParseEnable,
     kParseCache,
     kParseDisallow,
+    kParseFlush
   };
 
   void Configuration::AddHostConfiguration(HostConfiguration * hc){
@@ -130,7 +131,7 @@ namespace Gzip {
   bool HostConfiguration::ContentTypeIsCompressible(const char * content_type, int content_type_length) {
     string scontent_type(content_type, content_type_length);
     bool is_match = false;
-    
+
     for (size_t i = 0; i < compressible_content_types_.size(); i++) {
       const char* match_string = compressible_content_types_[i].c_str();
       bool exclude = match_string[0] == '!';
@@ -221,6 +222,8 @@ namespace Gzip {
             state = kParseCache;
           } else if (token == "disallow" ) {
             state = kParseDisallow;
+          } else if (token == "flush" ) {
+            state = kParseFlush;
           }
           else {
             warning("failed to interpret \"%s\" at line %zu", token.c_str(), lineno);
@@ -244,6 +247,10 @@ namespace Gzip {
           break;
         case kParseDisallow:
           current_host_configuration->add_disallow(token);
+          state = kParseStart;
+          break;
+        case kParseFlush:
+          current_host_configuration->set_flush(token == "true");
           state = kParseStart;
           break;
         }

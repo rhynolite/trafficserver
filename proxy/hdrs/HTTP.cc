@@ -30,7 +30,6 @@
 #include "HdrToken.h"
 #include "Diags.h"
 
-
 /***********************************************************************
  *                                                                     *
  *                    C O M P I L E    O P T I O N S                   *
@@ -109,6 +108,7 @@ const char *HTTP_VALUE_PROXY_REVALIDATE;
 const char *HTTP_VALUE_PUBLIC;
 const char *HTTP_VALUE_S_MAXAGE;
 const char *HTTP_VALUE_NEED_REVALIDATE_ONCE;
+const char *HTTP_VALUE_100_CONTINUE;
 // Cache-control: extension "need-revalidate-once" is used internally by T.S.
 // to invalidate a document, and it is not returned/forwarded.
 // If a cached document has this extension set (ie, is invalidated),
@@ -143,6 +143,7 @@ int HTTP_LEN_PROXY_REVALIDATE;
 int HTTP_LEN_PUBLIC;
 int HTTP_LEN_S_MAXAGE;
 int HTTP_LEN_NEED_REVALIDATE_ONCE;
+int HTTP_LEN_100_CONTINUE;
 
 Arena* const HTTPHdr::USE_HDR_HEAP_MAGIC = reinterpret_cast<Arena*>(1);
 
@@ -257,6 +258,7 @@ http_init()
     HTTP_VALUE_PUBLIC = hdrtoken_string_to_wks("public");
     HTTP_VALUE_S_MAXAGE = hdrtoken_string_to_wks("s-maxage");
     HTTP_VALUE_NEED_REVALIDATE_ONCE = hdrtoken_string_to_wks("need-revalidate-once");
+    HTTP_VALUE_100_CONTINUE = hdrtoken_string_to_wks("100-continue");
 
     HTTP_LEN_BYTES = hdrtoken_wks_to_length(HTTP_VALUE_BYTES);
     HTTP_LEN_CHUNKED = hdrtoken_wks_to_length(HTTP_VALUE_CHUNKED);
@@ -280,6 +282,7 @@ http_init()
     HTTP_LEN_PUBLIC = hdrtoken_wks_to_length(HTTP_VALUE_PUBLIC);
     HTTP_LEN_S_MAXAGE = hdrtoken_wks_to_length(HTTP_VALUE_S_MAXAGE);
     HTTP_LEN_NEED_REVALIDATE_ONCE = hdrtoken_wks_to_length(HTTP_VALUE_NEED_REVALIDATE_ONCE);
+    HTTP_LEN_100_CONTINUE = hdrtoken_wks_to_length(HTTP_VALUE_100_CONTINUE);
 
     // TODO: We need to look into enable these CC values as WKS XXX
 #if 0
@@ -949,7 +952,9 @@ http_parser_parse_req(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const 
       if (version == HTTP_VERSION(0, 9))
         return PARSE_DONE;
 
-      return mime_parser_parse(&parser->m_mime_parser, heap, hh->m_fields_impl, start, end, must_copy_strings, eof);
+      MIMEParseResult ret =  mime_parser_parse(&parser->m_mime_parser, heap, hh->m_fields_impl, start, end, must_copy_strings, eof);
+      if (ret == PARSE_DONE) ret = validate_hdr_host(hh); // if we're done with the main parse, check HOST.
+      return ret;
     }
 #endif
 
@@ -969,9 +974,13 @@ http_parser_parse_req(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const 
       goto start;
 
   parse_method1:
+
     if (ParseRules::is_ws(*cur)) {
       GETNEXT(done);
       goto parse_method1;
+    }
+    if (!ParseRules::is_token(*cur)) {
+      goto done;
     }
     method_start = cur;
     GETNEXT(done);
@@ -979,6 +988,9 @@ http_parser_parse_req(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const 
     if (ParseRules::is_ws(*cur)) {
       method_end = cur;
       goto parse_version1;
+    }
+    if (!ParseRules::is_token(*cur)) {
+      goto done;
     }
     GETNEXT(done);
     goto parse_method2;
@@ -1080,9 +1092,42 @@ http_parser_parse_req(HTTPParser *parser, HdrHeap *heap, HTTPHdrImpl *hh, const 
     parser->m_parsing_http = false;
     if (version == HTTP_VERSION(0, 9))
       return PARSE_DONE;
+
+  	MIMEParseResult ret =  mime_parser_parse(&parser->m_mime_parser, heap, hh->m_fields_impl, start, end, must_copy_strings, eof);
+  	if (ret == PARSE_DONE) ret = validate_hdr_host(hh); // if we're done with the main parse, check HOST.
+  	return ret;
   }
 
   return mime_parser_parse(&parser->m_mime_parser, heap, hh->m_fields_impl, start, end, must_copy_strings, eof);
+}
+
+MIMEParseResult
+validate_hdr_host(HTTPHdrImpl* hh) {
+  MIMEParseResult ret = PARSE_DONE;
+  MIMEField* host_field = mime_hdr_field_find(hh->m_fields_impl, MIME_FIELD_HOST, MIME_LEN_HOST);
+  if (host_field) {
+    if (host_field->has_dups()) {
+      ret = PARSE_ERROR; // can't have more than 1 host field.
+    } else {
+      int host_len = 0;
+      char const* host_val = host_field->value_get(&host_len);
+      ts::ConstBuffer addr, port, rest, host(host_val, host_len);
+      if (0 == ats_ip_parse(host, &addr, &port, &rest)) {
+	if (port) {
+	  if (port.size() > 5) return PARSE_ERROR;
+	  int port_i = ink_atoi(port.data(), port.size());
+          if ( port.size() > 5 || port_i >= 65536 || port_i <= 0) return PARSE_ERROR;
+        } 
+        while (rest && PARSE_DONE == ret) {
+          if (!ParseRules::is_ws(*rest)) return PARSE_ERROR;
+          ++rest;
+        }
+      } else {
+        ret = PARSE_ERROR;
+      }
+    }
+  }
+  return ret;
 }
 
 /*-------------------------------------------------------------------------
@@ -1518,7 +1563,6 @@ class UrlPrintHack {
     hdr->_test_and_fill_target_cache();
     if (hdr->m_url_cached.valid()) {
       URLImpl* ui = hdr->m_url_cached.m_url_impl;
-      char port_buff[10];
 
       m_hdr = hdr; // mark as potentially having modified values.
 
@@ -1539,8 +1583,8 @@ class UrlPrintHack {
 
       if (0 == hdr->m_url_cached.port_get_raw() && hdr->m_port_in_header) {
         ink_assert(0 == ui->m_ptr_port); // shouldn't be set if not in URL.
-        ui->m_ptr_port = port_buff;
-        ui->m_len_port = sprintf(port_buff, "%.5d", hdr->m_port);
+        ui->m_ptr_port = m_port_buff;
+        ui->m_len_port = sprintf(m_port_buff, "%.5d", hdr->m_port);
         m_port_modified_p = true;
       } else {
         m_port_modified_p = false;
@@ -1575,13 +1619,15 @@ class UrlPrintHack {
   bool is_valid() const {
     return 0 != m_hdr;
   }
-   
+
   /// Saved values.
   ///@{
   bool m_host_modified_p;
   bool m_port_modified_p;
   HTTPHdr* m_hdr;
   ///@}
+  /// Temporary buffer for port data.
+  char m_port_buff[6];
 };
 
 char*
@@ -1685,6 +1731,19 @@ HTTPHdrImpl::move_strings(HdrStrHeap *new_heap)
   } else {
     ink_release_assert(!"unknown m_polarity");
   }
+}
+
+size_t
+HTTPHdrImpl::strings_length()
+{
+  size_t ret = 0;
+
+  if (m_polarity == HTTP_TYPE_REQUEST) {
+   ret += u.req.m_len_method;
+  } else if (m_polarity == HTTP_TYPE_RESPONSE) {
+   ret += u.resp.m_len_reason;
+  }
+  return ret;
 }
 
 void

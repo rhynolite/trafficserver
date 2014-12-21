@@ -100,7 +100,7 @@ MultiFile::WalkFiles(ExpandingArray * fileList)
   DIR *dir;
   char *fileName;
   char *filePath;
-  char *records_config_filePath = NULL;
+  char *records_config_filePath;
   struct stat fileInfo;
   struct stat records_config_fileInfo;
   fileEntry *fileListEntry;
@@ -113,7 +113,7 @@ MultiFile::WalkFiles(ExpandingArray * fileList)
   // The fun of Solaris - readdir_r requires a buffer passed into it
   //   The man page says this obscene expression gives us the proper
   //     size
-  dirEntry = (struct dirent *)ats_malloc(sizeof(struct dirent) + pathconf(".", _PC_NAME_MAX) + 1);
+  dirEntry = (struct dirent *)ats_malloc(sizeof(struct dirent) + ink_file_namemax(".") + 1);
 
   struct dirent *result;
   while (readdir_r(dir, dirEntry, &result) == 0) {
@@ -138,13 +138,13 @@ MultiFile::WalkFiles(ExpandingArray * fileList)
       }
     }
     delete[]filePath;
+    delete[]records_config_filePath;
   }
 
   ats_free(dirEntry);
   closedir(dir);
 
   fileList->sortWithFunction(fileEntryCmpFunc);
-  delete[]records_config_filePath;
   return MF_OK;
 }
 

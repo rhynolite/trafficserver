@@ -15,6 +15,8 @@
   specific language governing permissions and limitations
   under the License.
 
+.. _traffic_manager:
+
 ===============
 traffic_manager
 ===============
@@ -47,3 +49,13 @@ Environment
 .. envvar:: MGMT_CLUSTER_RS_PORT
 .. envvar:: MGMT_GROUP_ADDR
 
+Signals
+=======
+
+SIGHUP
+  This signal causes a reconfiguration event, equivalent to running :program:`traffic_line -x`.
+
+See also
+========
+
+:manpage:`traffic_line(8)`

@@ -192,6 +192,8 @@ public:
   DList(UnixNetVConnection, cop_link) cop_list;
   ASLLM(UnixNetVConnection, NetState, read, enable_link) read_enable_list;
   ASLLM(UnixNetVConnection, NetState, write, enable_link) write_enable_list;
+  DList(UnixNetVConnection, keep_alive_link) keep_alive_list;
+  uint32_t keep_alive_lru_size;
 
   time_t sec;
   int cycles;
@@ -246,7 +248,7 @@ check_shedding_warning()
   ink_hrtime t = ink_get_hrtime();
   if (t - last_shedding_warning > NET_THROTTLE_MESSAGE_EVERY) {
     last_shedding_warning = t;
-    REC_SignalWarning(REC_SIGNAL_SYSTEM_ERROR, "number of connections reaching shedding limit");
+    RecSignalWarning(REC_SIGNAL_SYSTEM_ERROR, "number of connections reaching shedding limit");
   }
 }
 
@@ -276,7 +278,7 @@ check_throttle_warning()
   ink_hrtime t = ink_get_hrtime();
   if (t - last_throttle_warning > NET_THROTTLE_MESSAGE_EVERY) {
     last_throttle_warning = t;
-    REC_SignalWarning(REC_SIGNAL_SYSTEM_ERROR, "too many connections, throttling");
+    RecSignalWarning(REC_SIGNAL_SYSTEM_ERROR, "too many connections, throttling");
 
   }
 }
@@ -300,7 +302,7 @@ check_emergency_throttle(Connection & con)
   if (fd > emergency) {
     int over = fd - emergency;
     emergency_throttle_time = ink_get_hrtime() + (over * over) * HRTIME_SECOND;
-    REC_SignalWarning(REC_SIGNAL_SYSTEM_ERROR, "too many open file descriptors, emergency throttling");
+    RecSignalWarning(REC_SIGNAL_SYSTEM_ERROR, "too many open file descriptors, emergency throttling");
     int hyper_emergency = fds_limit - HYPER_EMERGENCY_THROTTLE;
     if (fd > hyper_emergency)
       con.close();
@@ -397,8 +399,10 @@ read_disable(NetHandler * nh, UnixNetVConnection * vc)
     }
   }
 #else
-  if (!vc->write.enabled)
+  if (!vc->write.enabled) {
     vc->next_inactivity_timeout_at = 0;
+    Debug("socket", "read_disable updating inactivity_at %" PRId64 ", NetVC=%p", vc->next_inactivity_timeout_at, vc);
+  }
 #endif
   vc->read.enabled = 0;
   nh->read_ready_list.remove(vc);
@@ -416,8 +420,10 @@ write_disable(NetHandler * nh, UnixNetVConnection * vc)
     }
   }
 #else
-  if (!vc->read.enabled)
+  if (!vc->read.enabled) {
     vc->next_inactivity_timeout_at = 0;
+    Debug("socket", "write_disable updating inactivity_at %" PRId64 ", NetVC=%p", vc->next_inactivity_timeout_at, vc);
+  }
 #endif
   vc->write.enabled = 0;
   nh->write_ready_list.remove(vc);
@@ -532,17 +538,17 @@ TS_INLINE int EventIO::modify(int e) {
     if (((-e) & events)) {
       ne = ~(-e) & events;
       if ((-e) & EVENTIO_READ)
-	n++;
+        n++;
       if ((-e) & EVENTIO_WRITE)
-	n++;
+        n++;
     }
   } else {
     if (!(e & events)) {
       ne = events | e;
       if (e & EVENTIO_READ)
-	n++;
+        n++;
       if (e & EVENTIO_WRITE)
-	n++;
+        n++;
     }
   }
   if (n && ne && event_loop) {

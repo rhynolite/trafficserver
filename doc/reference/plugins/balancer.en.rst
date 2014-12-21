@@ -33,6 +33,11 @@ to the ``--policy`` option is a comma-separated list of keywords.
 The first keyword is the name of a balancing policy. The subsequent
 keywords are used to refine the requested policy.
 
+The remaining plugin arguments are balancer targets. Typically,
+these will be the host names of origin servers that requests should
+be balanced across. The target name may contain a colon-separated
+port number.
+
 Hash Balancing Policy
 ---------------------
 
@@ -55,6 +60,9 @@ url
 
 srcaddr
   The source IP address of the request.
+
+dstaddr
+  The destination IP address of the request.
 
 Round Robin Balancing Policy
 ----------------------------

@@ -38,9 +38,12 @@ extern "C" void fd_reify(struct ev_loop *);
 // INKqa10496
 // One Inactivity cop runs on each thread once every second and
 // loops through the list of NetVCs and calls the timeouts
-struct InactivityCop : public Continuation {
-  InactivityCop(ProxyMutex *m):Continuation(m) {
+class InactivityCop : public Continuation {
+public:
+  InactivityCop(ProxyMutex *m):Continuation(m), default_inactivity_timeout(0) {
     SET_HANDLER(&InactivityCop::check_inactivity);
+    REC_ReadConfigInteger(default_inactivity_timeout, "proxy.config.net.default_inactivity_timeout");
+    Debug("inactivity_cop", "default inactivity timeout is set to: %d", default_inactivity_timeout);
   }
   int check_inactivity(int event, Event *e) {
     (void) event;
@@ -52,9 +55,9 @@ struct InactivityCop : public Continuation {
         nh->cop_list.push(vc);
     }
     while (UnixNetVConnection *vc = nh->cop_list.pop()) {
-      // If we cannot ge tthe lock don't stop just keep cleaning
+      // If we cannot get the lock don't stop just keep cleaning
       MUTEX_TRY_LOCK(lock, vc->mutex, this_ethread());
-      if (!lock.lock_acquired) {
+      if (!lock.is_locked()) {
        NET_INCREMENT_DYN_STAT(inactivity_cop_lock_acquire_failure_stat);
        continue;
       }
@@ -62,24 +65,56 @@ struct InactivityCop : public Continuation {
       if (vc->closed) {
         close_UnixNetVConnection(vc, e->ethread);
         continue;
-      } 
+      }
+
+      // set a default inactivity timeout if one is not set
+      if (vc->next_inactivity_timeout_at == 0 && default_inactivity_timeout > 0) {
+        Debug("inactivity_cop", "vc: %p inactivity timeout not set, setting a default of %d", vc, default_inactivity_timeout);
+        vc->set_inactivity_timeout(HRTIME_SECONDS(default_inactivity_timeout));
+      } else {
+        Debug("inactivity_cop_verbose", "vc: %p timeout at: %" PRId64 " timeout in: %" PRId64, vc, ink_hrtime_to_sec(vc->next_inactivity_timeout_at),
+            ink_hrtime_to_sec(vc->inactivity_timeout_in));
+      }
+
       if (vc->next_inactivity_timeout_at && vc->next_inactivity_timeout_at < now)
         vc->handleEvent(EVENT_IMMEDIATE, e);
     }
+
+    // Keep-alive LRU for incoming connections
+    int32_t max_keep_alive = 0;
+    REC_ReadConfigInt32(max_keep_alive, "proxy.config.http.client_max_keep_alive_connections");
+    if (max_keep_alive > 0) {
+      const int event_threads = eventProcessor.n_threads_for_type[ET_NET];
+      const int ssl_threads = (ET_NET == SSLNetProcessor::ET_SSL) ? 0 : eventProcessor.n_threads_for_type[SSLNetProcessor::ET_SSL];
+
+      max_keep_alive = max_keep_alive / (event_threads + ssl_threads);
+      Debug("inactivity_cop_verbose", "max_keep_alive: %d lru size: %d net threads: %d ssl threads: %d net type: %d "
+            "ssl type: %d", max_keep_alive, nh->keep_alive_lru_size, event_threads, ssl_threads, ET_NET,
+            SSLNetProcessor::ET_SSL);
+
+      while (nh->keep_alive_lru_size > (uint32_t)max_keep_alive) {
+        UnixNetVConnection *vc = nh->keep_alive_list.pop();
+        Debug("inactivity_cop", "removing keep-alives from the lru NetVC=%p size: %u", vc, nh->keep_alive_lru_size);
+        --(nh->keep_alive_lru_size);
+        close_UnixNetVConnection(vc, e->ethread);
+      }
+    }
     return 0;
   }
+private:
+  int default_inactivity_timeout;  // only used when one is not set for some bad reason
 };
 #endif
 
 PollCont::PollCont(ProxyMutex *m, int pt):Continuation(m), net_handler(NULL), nextPollDescriptor(NULL), poll_timeout(pt) {
-  pollDescriptor = NEW(new PollDescriptor);
+  pollDescriptor = new PollDescriptor;
   pollDescriptor->init();
   SET_HANDLER(&PollCont::pollEvent);
 }
 
 PollCont::PollCont(ProxyMutex *m, NetHandler *nh, int pt):Continuation(m), net_handler(nh), nextPollDescriptor(NULL), poll_timeout(pt)
 {
-  pollDescriptor = NEW(new PollDescriptor);
+  pollDescriptor = new PollDescriptor;
   pollDescriptor->init();
   SET_HANDLER(&PollCont::pollEvent);
 }
@@ -204,7 +239,7 @@ initialize_thread_for_net(EThread *thread)
   thread->schedule_imm(get_NetHandler(thread));
 
 #ifndef INACTIVITY_TIMEOUT
-  InactivityCop *inactivityCop = NEW(new InactivityCop(get_NetHandler(thread)->mutex));
+  InactivityCop *inactivityCop = new InactivityCop(get_NetHandler(thread)->mutex);
   thread->schedule_every(inactivityCop, HRTIME_SECONDS(1));
 #endif
 
@@ -220,7 +255,7 @@ initialize_thread_for_net(EThread *thread)
 
 // NetHandler method definitions
 
-NetHandler::NetHandler():Continuation(NULL), trigger_event(0)
+NetHandler::NetHandler():Continuation(NULL), trigger_event(0), keep_alive_lru_size(0)
 {
   SET_HANDLER((NetContHandler) & NetHandler::startNetEvent);
 }
@@ -279,7 +314,7 @@ NetHandler::mainNetEvent(int event, Event *e)
   (void) event;
   (void) e;
   EventIO *epd = NULL;
-  int poll_timeout = net_config_poll_timeout;
+  int poll_timeout;
 
   NET_INCREMENT_DYN_STAT(net_handler_run_stat);
 

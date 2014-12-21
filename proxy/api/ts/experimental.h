@@ -21,7 +21,7 @@
     limitations under the License.
 */
 
-/* 
+/*
  *   Interfaces in this header file are experimental, undocumented and
  *   are subject to change even across minor releases of Traffic Server.
  *   None of the interfaces in this file are committed to be stable
@@ -37,19 +37,6 @@ extern "C"
 {
 #endif                          /* __cplusplus */
 
-  /* For Extended FetchSM APIs */
-  typedef enum {
-    TS_FETCH_METHOD_NONE,
-    TS_FETCH_METHOD_GET,
-    TS_FETCH_METHOD_POST,
-    TS_FETCH_METHOD_CONNECT,
-    TS_FETCH_METHOD_DELETE,
-    TS_FETCH_METHOD_HEAD,
-    TS_FETCH_METHOD_PURGE,
-    TS_FETCH_METHOD_PUT,
-    TS_FETCH_METHOD_LAST
-  } TSFetchMethod;
-
   typedef enum
   {
     TS_FETCH_EVENT_EXT_HEAD_READY = -1,
@@ -64,11 +51,12 @@ extern "C"
     TS_FETCH_FLAGS_STREAM = 1 << 1,    // enable stream IO
     TS_FETCH_FLAGS_DECHUNK = 1 << 2,   // dechunk body content
     TS_FETCH_FLAGS_NEWLOCK = 1 << 3,   // allocate new lock for fetch sm
+    TS_FETCH_FLAGS_NOT_INTERNAL_REQUEST = 1 << 4 // Allow this fetch to be created as a non-internal request.
   } TSFetchFlags;
 
   typedef struct tsapi_fetchsm* TSFetchSM;
 
-  /* Forward declaration of in_addr, any user of these APIs should probably 
+  /* Forward declaration of in_addr, any user of these APIs should probably
      include net/netinet.h or whatever is appropriate on the platform. */
   struct in_addr;
 
@@ -648,7 +636,7 @@ extern "C"
    *
    * return TSFetchSM which should be destroyed by TSFetchDestroy().
    */
-  tsapi TSFetchSM TSFetchCreate(TSCont contp, TSFetchMethod method,
+  tsapi TSFetchSM TSFetchCreate(TSCont contp, const char *method,
                                 const char *url, const char *version,
                                 struct sockaddr const* client_addr, int flags);
 

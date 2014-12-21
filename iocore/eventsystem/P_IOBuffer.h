@@ -149,14 +149,7 @@ iobuffer_mem_inc(const char *_loc, int64_t _size_index)
 
   if (!_loc)
     _loc = "memory/IOBuffer/UNKNOWN-LOCATION";
-  Resource *res = res_lookup(_loc);
-  ink_assert(strcmp(_loc, res->path) == 0);
-#ifdef DEBUG  
-  int64_t r = ink_atomic_increment(&res->value, index_to_buffer_size(_size_index));
-  ink_assert(r >= 0);
-#else
-  ink_atomic_increment(&res->value, index_to_buffer_size(_size_index));
-#endif
+  ResourceTracker::increment(_loc, index_to_buffer_size(_size_index));
 }
 
 TS_INLINE void
@@ -169,14 +162,7 @@ iobuffer_mem_dec(const char *_loc, int64_t _size_index)
     return;
   if (!_loc)
     _loc = "memory/IOBuffer/UNKNOWN-LOCATION";
-  Resource *res = res_lookup(_loc);
-  ink_assert(strcmp(_loc, res->path) == 0);
-#ifdef DEBUG  
-  int64_t r = ink_atomic_increment(&res->value, -index_to_buffer_size(_size_index));
-  ink_assert(r >= index_to_buffer_size(_size_index));
-#else
-  ink_atomic_increment(&res->value, -index_to_buffer_size(_size_index));
-#endif
+  ResourceTracker::increment(_loc, -index_to_buffer_size(_size_index));
 }
 #endif
 
@@ -290,7 +276,7 @@ IOBufferData::alloc(int64_t size_index, AllocType type)
   switch (type) {
   case MEMALIGNED:
     if (BUFFER_SIZE_INDEX_IS_FAST_ALLOCATED(size_index))
-      _data = (char *) THREAD_ALLOC(ioBufAllocator[size_index], this_thread());
+      _data = (char *) ioBufAllocator[size_index].alloc_void();
     // coverity[dead_error_condition]
     else if (BUFFER_SIZE_INDEX_IS_XMALLOCED(size_index))
       _data = (char *)ats_memalign(ats_pagesize(), index_to_buffer_size(size_index));
@@ -298,7 +284,7 @@ IOBufferData::alloc(int64_t size_index, AllocType type)
   default:
   case DEFAULT_ALLOC:
     if (BUFFER_SIZE_INDEX_IS_FAST_ALLOCATED(size_index))
-      _data = (char *) THREAD_ALLOC(ioBufAllocator[size_index], this_thread());
+      _data = (char *) ioBufAllocator[size_index].alloc_void();
     else if (BUFFER_SIZE_INDEX_IS_XMALLOCED(size_index))
       _data = (char *)ats_malloc(BUFFER_SIZE_FOR_XMALLOC(size_index));
     break;
@@ -317,14 +303,14 @@ IOBufferData::dealloc()
   switch (_mem_type) {
   case MEMALIGNED:
     if (BUFFER_SIZE_INDEX_IS_FAST_ALLOCATED(_size_index))
-      THREAD_FREE(_data, ioBufAllocator[_size_index], this_thread());
+      ioBufAllocator[_size_index].free_void(_data);
     else if (BUFFER_SIZE_INDEX_IS_XMALLOCED(_size_index))
       ::free((void *) _data);
     break;
   default:
   case DEFAULT_ALLOC:
     if (BUFFER_SIZE_INDEX_IS_FAST_ALLOCATED(_size_index))
-      THREAD_FREE(_data, ioBufAllocator[_size_index], this_thread());
+      ioBufAllocator[_size_index].free_void(_data);
     else if (BUFFER_SIZE_INDEX_IS_XMALLOCED(_size_index))
       ats_free(_data);
     break;
@@ -530,13 +516,12 @@ IOBufferBlock::realloc_xmalloc(int64_t buf_size)
 TS_INLINE void
 IOBufferBlock::realloc(int64_t i)
 {
-  if (i == data->_size_index)
+  if ((i == data->_size_index) || (i >= (int64_t)countof(ioBufAllocator))) {
     return;
-  if (i >= (int64_t) sizeof(ioBufAllocator))
-    return;
+  }
 
   ink_release_assert(i > data->_size_index && i != BUFFER_SIZE_NOT_ALLOCATED);
-  void *b = THREAD_ALLOC(ioBufAllocator[i], this_thread());
+  void *b = ioBufAllocator[i].alloc_void();
   realloc_set_internal(b, BUFFER_SIZE_FOR_INDEX(i), i);
 }
 
@@ -735,12 +720,12 @@ inkcoreapi extern ClassAllocator<MIOBuffer> ioAllocator;
 TS_INLINE
 MIOBuffer::MIOBuffer(void *b, int64_t bufsize, int64_t aWater_mark)
 {
-  set(b, bufsize);
-  water_mark = aWater_mark;
-  size_index = BUFFER_SIZE_NOT_ALLOCATED;
 #ifdef TRACK_BUFFER_USER
   _location = NULL;
 #endif
+  set(b, bufsize);
+  water_mark = aWater_mark;
+  size_index = BUFFER_SIZE_NOT_ALLOCATED;
   return;
 }
 

@@ -51,7 +51,7 @@
 #include "PluginVC.h"
 #include "api/ts/experimental.h"
 #include "ICP.h"
-#include "HttpAccept.h"
+#include "HttpSessionAccept.h"
 #include "PluginVC.h"
 #include "FetchSM.h"
 #include "HttpDebugNames.h"
@@ -82,11 +82,14 @@
     _HDR.m_mime = _HDR.m_http->m_fields_impl;
 
 // Globals for new librecords stats
-volatile int top_stat = 0;
-RecRawStatBlock *api_rsb;
+static volatile int api_rsb_index = 0;
+static RecRawStatBlock * api_rsb;
+
+// Library init functions needed for API.
+extern void ts_session_protocol_well_known_name_indices_init();
 
 // Globals for the Sessions/Transaction index registry
-volatile int next_argv_index = 0;
+static volatile int next_argv_index = 0;
 
 struct _STATE_ARG_TABLE {
   char* name;
@@ -356,18 +359,11 @@ tsapi int TS_HTTP_LEN_PUT;
 tsapi int TS_HTTP_LEN_TRACE;
 tsapi int TS_HTTP_LEN_PUSH;
 
-/* TLS Next Protocol well-known protocol names. */
-
-tsapi const char * TS_NPN_PROTOCOL_HTTP_1_0 = "http/1.0";
-tsapi const char * TS_NPN_PROTOCOL_HTTP_1_1 = "http/1.1";
-tsapi const char * TS_NPN_PROTOCOL_SPDY_1   = "spdy/1";   // obsolete
-tsapi const char * TS_NPN_PROTOCOL_SPDY_2   = "spdy/2";   // shipping
-tsapi const char * TS_NPN_PROTOCOL_SPDY_3   = "spdy/3";   // upcoming
-
 /* MLoc Constants */
 tsapi const TSMLoc TS_NULL_MLOC = (TSMLoc)NULL;
 
 HttpAPIHooks *http_global_hooks = NULL;
+SslAPIHooks *ssl_hooks = NULL;
 LifecycleAPIHooks* lifecycle_hooks = NULL;
 ConfigUpdateCbTable *global_config_cbs = NULL;
 
@@ -644,6 +640,14 @@ TSReturnCode
 sdk_sanity_check_lifecycle_hook_id(TSLifecycleHookID id)
 {
   if (id<TS_LIFECYCLE_PORTS_INITIALIZED_HOOK || id> TS_LIFECYCLE_LAST_HOOK)
+    return TS_ERROR;
+  return TS_SUCCESS;
+}
+
+TSReturnCode
+sdk_sanity_check_ssl_hook_id(TSHttpHookID id)
+{
+  if (id<TS_SSL_FIRST_HOOK || id> TS_SSL_LAST_HOOK)
     return TS_ERROR;
   return TS_SUCCESS;
 }
@@ -1253,7 +1257,7 @@ APIHooks::append(INKContInternal *cont)
 }
 
 APIHook *
-APIHooks::get()
+APIHooks::get() const
 {
   return m_hooks.head;
 }
@@ -1326,7 +1330,7 @@ ConfigUpdateCbTable::invoke(const char *name)
 void
 ConfigUpdateCbTable::invoke(INKContInternal *contp)
 {
-  eventProcessor.schedule_imm(NEW(new ConfigUpdateCallback(contp)), ET_TASK);
+  eventProcessor.schedule_imm(new ConfigUpdateCallback(contp), ET_TASK);
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -1593,9 +1597,10 @@ api_init()
     TS_HTTP_LEN_PUBLIC = HTTP_LEN_PUBLIC;
     TS_HTTP_LEN_S_MAXAGE = HTTP_LEN_S_MAXAGE;
 
-    http_global_hooks = NEW(new HttpAPIHooks);
-    lifecycle_hooks = NEW(new LifecycleAPIHooks);
-    global_config_cbs = NEW(new ConfigUpdateCbTable);
+    http_global_hooks = new HttpAPIHooks;
+    ssl_hooks = new SslAPIHooks;
+    lifecycle_hooks = new LifecycleAPIHooks;
+    global_config_cbs = new ConfigUpdateCbTable;
 
     if (TS_MAX_API_STATS > 0) {
       api_rsb = RecAllocateRawStatBlock(TS_MAX_API_STATS);
@@ -1617,7 +1622,6 @@ api_init()
     if (sscanf(traffic_server_version, "%d.%d.%d", &ts_major_version, &ts_minor_version, &ts_patch_version) != 3) {
       Warning("Unable to parse traffic server version string '%s'\n", traffic_server_version);
     }
-
   }
 }
 
@@ -1726,7 +1730,14 @@ TSInstallDirGet(void)
 const char *
 TSConfigDirGet(void)
 {
-  return Layout::get()->sysconfdir;
+  static char * sysconfdir = NULL;
+
+  // This is not great, bit it's no worse than TSPluginDirGet :-/
+  if (sysconfdir == NULL) {
+    sysconfdir = RecConfigReadConfigDir();
+  }
+
+  return sysconfdir;
 }
 
 const char *
@@ -1745,14 +1756,8 @@ TSPluginDirGet(void)
   static char path[PATH_NAME_MAX + 1] = "";
 
   if (*path == '\0') {
-    char *plugin_dir = NULL;
-    RecGetRecordString_Xmalloc("proxy.config.plugin.plugin_dir", &plugin_dir);
-    if (!plugin_dir) {
-      Error("Unable to read proxy.config.plugin.plugin_dir");
-      return NULL;
-    }
-    Layout::relative_to(path, sizeof(path),
-                        Layout::get()->prefix, plugin_dir);
+    char * plugin_dir = RecConfigReadPrefixPath("proxy.config.plugin.plugin_dir");
+    ink_strlcpy(path, plugin_dir, sizeof(path));
     ats_free(plugin_dir);
   }
 
@@ -1810,7 +1815,7 @@ TSfopen(const char *filename, const char *mode)
 {
   FileImpl *file;
 
-  file = NEW(new FileImpl);
+  file = new FileImpl;
   if (!file->fopen(filename, mode)) {
     delete file;
     return NULL;
@@ -1905,7 +1910,7 @@ TSMBuffer
 TSMBufferCreate(void)
 {
   TSMBuffer bufp;
-  HdrHeapSDKHandle *new_heap = NEW(new HdrHeapSDKHandle);
+  HdrHeapSDKHandle *new_heap = new HdrHeapSDKHandle;
 
   new_heap->m_heap = new_HdrHeap();
   bufp = (TSMBuffer)new_heap;
@@ -3769,6 +3774,19 @@ TSHttpHdrMethodSet(TSMBuffer bufp, TSMLoc obj, const char *value, int length)
   return TS_SUCCESS;
 }
 
+const char *
+TSHttpHdrHostGet(TSMBuffer bufp, TSMLoc obj, int *length)
+{
+  sdk_assert(sdk_sanity_check_mbuffer(bufp) == TS_SUCCESS);
+  sdk_assert(sdk_sanity_check_http_hdr_handle(obj) == TS_SUCCESS);
+  sdk_assert(sdk_sanity_check_null_ptr((void*)length) == TS_SUCCESS);
+
+  HTTPHdr h;
+
+  SET_HTTP_HDR(h, bufp, obj);
+  return h.host_get(length);
+}
+
 TSReturnCode
 TSHttpHdrUrlGet(TSMBuffer bufp, TSMLoc obj, TSMLoc *locp)
 {
@@ -3907,7 +3925,7 @@ sdk_sanity_check_cachekey(TSCacheKey key)
 TSCacheKey
 TSCacheKeyCreate(void)
 {
-  TSCacheKey key = (TSCacheKey)NEW(new CacheInfo());
+  TSCacheKey key = (TSCacheKey)new CacheInfo();
 
   // TODO: Probably remove this when we can be use "NEW" can't fail.
   sdk_assert(sdk_sanity_check_cachekey(key) == TS_SUCCESS);
@@ -3920,11 +3938,12 @@ TSCacheKeyDigestSet(TSCacheKey key, const char *input, int length)
   sdk_assert(sdk_sanity_check_cachekey(key) == TS_SUCCESS);
   sdk_assert(sdk_sanity_check_iocore_structure((void*) input) == TS_SUCCESS);
   sdk_assert(length > 0);
+  CacheInfo* ci = reinterpret_cast<CacheInfo*>(key);
 
-  if (((CacheInfo *) key)->magic != CACHE_INFO_MAGIC_ALIVE)
+  if (ci->magic != CACHE_INFO_MAGIC_ALIVE)
     return TS_ERROR;
 
-  ((CacheInfo *) key)->cache_key.encodeBuffer((char *) input, length);
+  MD5Context().hash_immediate(ci->cache_key, input, length);
   return TS_SUCCESS;
 }
 
@@ -4014,7 +4033,7 @@ TSCacheKeyDestroy(TSCacheKey key)
 TSCacheHttpInfo
 TSCacheHttpInfoCopy(TSCacheHttpInfo infop)
 {
-  CacheHTTPInfo *new_info = NEW(new CacheHTTPInfo);
+  CacheHTTPInfo *new_info = new CacheHTTPInfo;
 
   new_info->copy((CacheHTTPInfo *) infop);
   return reinterpret_cast<TSCacheHttpInfo>(new_info);
@@ -4129,7 +4148,7 @@ TSCacheHttpInfoCreate(void)
 unsigned int
 TSConfigSet(unsigned int id, void *data, TSConfigDestroyFunc funcp)
 {
-  INKConfigImpl *config = NEW(new INKConfigImpl);
+  INKConfigImpl *config = new INKConfigImpl;
   config->mdata = data;
   config->m_destroy_func = funcp;
   return configProcessor.set(id, config);
@@ -4389,10 +4408,19 @@ TSContMutexGet(TSCont contp)
 void
 TSHttpHookAdd(TSHttpHookID id, TSCont contp)
 {
+  INKContInternal *icontp;
   sdk_assert(sdk_sanity_check_continuation(contp) == TS_SUCCESS);
   sdk_assert(sdk_sanity_check_hook_id(id) == TS_SUCCESS);
 
-  http_global_hooks->append(id, (INKContInternal *)contp);
+  icontp = reinterpret_cast<INKContInternal*>(contp);
+
+  if (id >= TS_SSL_FIRST_HOOK && id <= TS_SSL_LAST_HOOK) {
+    TSSslHookInternalID internalId = static_cast<TSSslHookInternalID>(id - TS_SSL_FIRST_HOOK);
+    ssl_hooks->append(internalId , icontp);
+  }
+  else { // Follow through the regular HTTP hook framework
+    http_global_hooks->append(id, icontp);
+  }
 }
 
 void
@@ -4473,11 +4501,11 @@ TSHttpSsnReenable(TSHttpSsn ssnp, TSEvent event)
   // which is DEDICATED, the continuation needs to be called back on a
   // REGULAR thread.
   if (eth->tt != REGULAR) {
-    eventProcessor.schedule_imm(NEW(new TSHttpSsnCallback(cs, event)), ET_NET);
+    eventProcessor.schedule_imm(new TSHttpSsnCallback(cs, event), ET_NET);
   } else {
     MUTEX_TRY_LOCK(trylock, cs->mutex, eth);
-    if (!trylock) {
-      eventProcessor.schedule_imm(NEW(new TSHttpSsnCallback(cs, event)), ET_NET);
+    if (!trylock.is_locked()) {
+      eventProcessor.schedule_imm(new TSHttpSsnCallback(cs, event), ET_NET);
     } else {
       cs->handleEvent((int) event, 0);
     }
@@ -4896,8 +4924,8 @@ TSHttpTxnNewCacheLookupDo(TSHttpTxn txnp, TSMBuffer bufp, TSMLoc url_loc)
     s->cache_info.lookup_url = &(s->cache_info.lookup_url_storage);
     l_url = s->cache_info.lookup_url;
   } else {
-    l_url->MD5_get(&md51);
-    new_url.MD5_get(&md52);
+    l_url->hash_get(&md51);
+    new_url.hash_get(&md52);
     if (md51 == md52)
       return TS_ERROR;
     o_url = &(s->cache_info.original_url);
@@ -4933,17 +4961,6 @@ TSHttpTxnSecondUrlTryLock(TSHttpTxn txnp)
   sm->add_cache_sm();
   s->api_lock_url = HttpTransact::LOCK_URL_SECOND;
 
-  return TS_SUCCESS;
-}
-
-TSReturnCode
-TSHttpTxnFollowRedirect(TSHttpTxn txnp, int on)
-{
-  sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
-
-  HttpSM *sm = (HttpSM *) txnp;
-
-  sm->api_enable_redirection = (on ? true : false);
   return TS_SUCCESS;
 }
 
@@ -4987,7 +5004,7 @@ TSHttpTxnRedirectRequest(TSHttpTxn txnp, TSMBuffer bufp, TSMLoc url_loc)
   s->request_sent_time = 0;
   s->response_received_time = 0;
   s->cache_info.write_lock_state = HttpTransact::CACHE_WL_INIT;
-  s->next_action = HttpTransact::REDIRECT_READ;
+  s->next_action = HttpTransact::SM_ACTION_REDIRECT_READ;
 
   return TS_SUCCESS;
 }
@@ -5267,6 +5284,8 @@ TSHttpTxnServerAddrSet(TSHttpTxn txnp, struct sockaddr const* addr)
 
   HttpSM *sm = reinterpret_cast<HttpSM *>(txnp);
   if (ats_ip_copy(&sm->t_state.server_info.addr.sa, addr)) {
+    ats_ip_port_cast(&sm->t_state.server_info.addr.sa) = ats_ip_port_cast(addr);
+    sm->t_state.server_info.port = htons(ats_ip_port_cast(addr));
     sm->t_state.api_server_addr_set = true;
     return TS_SUCCESS;
   } else {
@@ -5422,46 +5441,46 @@ TSHttpTxnServerPacketTosSet(TSHttpTxn txnp, int tos)
   return TS_SUCCESS;
 }
 
+// Set the body, or, if you provide a NULL buffer, clear the body message
 void
-TSHttpTxnErrorBodySet(TSHttpTxn txnp, char *buf, int buflength, char *mimetype)
+TSHttpTxnErrorBodySet(TSHttpTxn txnp, char *buf, size_t buflength, char *mimetype)
 {
   sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
-  sdk_assert(sdk_sanity_check_null_ptr((void*)buf) == TS_SUCCESS);
-  sdk_assert(buflength > 0);
 
   HttpSM *sm = (HttpSM *) txnp;
   HttpTransact::State *s = &(sm->t_state);
 
-  if (s->internal_msg_buffer)
-    HttpTransact::free_internal_msg_buffer(s->internal_msg_buffer, s->internal_msg_buffer_fast_allocator_size);
-
-  ats_free_null(s->internal_msg_buffer_type);
+  // Cleanup anything already set.
+  s->free_internal_msg_buffer();
+  ats_free(s->internal_msg_buffer_type);
 
   s->internal_msg_buffer = buf;
-  s->internal_msg_buffer_type = mimetype;
-  s->internal_msg_buffer_size = buflength;
+  s->internal_msg_buffer_size = buf ? buflength : 0;
   s->internal_msg_buffer_fast_allocator_size = -1;
+
+  s->internal_msg_buffer_type = mimetype;
 }
 
 void
 TSHttpTxnServerRequestBodySet(TSHttpTxn txnp, char *buf, int64_t buflength)
 {
   sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
-  sdk_assert(sdk_sanity_check_null_ptr((void*)buf) == TS_SUCCESS);
-  sdk_assert(buflength > 0);
 
   HttpSM *sm = (HttpSM *) txnp;
   HttpTransact::State *s = &(sm->t_state);
 
-  if (s->method != HTTP_WKSIDX_GET)
-    return;
+  // Cleanup anything already set.
+  s->free_internal_msg_buffer();
 
-  if (s->internal_msg_buffer)
-    HttpTransact::free_internal_msg_buffer(s->internal_msg_buffer, s->internal_msg_buffer_fast_allocator_size);
-
-  s->api_server_request_body_set = true;
-  s->internal_msg_buffer = buf;
-  s->internal_msg_buffer_size = buflength;
+  if (buf) {
+    s->api_server_request_body_set = true;
+    s->internal_msg_buffer = buf;
+    s->internal_msg_buffer_size = buflength;
+  } else {
+    s->api_server_request_body_set = false;
+    s->internal_msg_buffer = NULL;
+    s->internal_msg_buffer_size = 0;
+  }
   s->internal_msg_buffer_fast_allocator_size = -1;
 }
 
@@ -5549,11 +5568,11 @@ TSHttpTxnReenable(TSHttpTxn txnp, TSEvent event)
   // which is DEDICATED, the continuation needs to be called back on a
   // REGULAR thread.
   if (eth == NULL || eth->tt != REGULAR) {
-    eventProcessor.schedule_imm(NEW(new TSHttpSMCallback(sm, event)), ET_NET);
+    eventProcessor.schedule_imm(new TSHttpSMCallback(sm, event), ET_NET);
   } else {
     MUTEX_TRY_LOCK(trylock, sm->mutex, eth);
-    if (!trylock) {
-      eventProcessor.schedule_imm(NEW(new TSHttpSMCallback(sm, event)), ET_NET);
+    if (!trylock.is_locked()) {
+      eventProcessor.schedule_imm(new TSHttpSMCallback(sm, event), ET_NET);
     } else {
       sm->state_api_callback((int) event, 0);
     }
@@ -5565,7 +5584,7 @@ TSHttpArgIndexReserve(const char* name, const char* description, int *arg_idx)
 {
   sdk_assert(sdk_sanity_check_null_ptr(arg_idx) == TS_SUCCESS);
 
-  int volatile ix = ink_atomic_increment(&next_argv_index, 1);
+  int ix = ink_atomic_increment(&next_argv_index, 1);
 
   if (ix < HTTP_SSN_TXN_MAX_USER_ARG) {
     state_arg_table[ix].name = ats_strdup(name);
@@ -5662,30 +5681,6 @@ TSHttpTxnSetHttpRetStatus(TSHttpTxn txnp, TSHttpStatus http_retstatus)
   sm->t_state.http_return_code = (HTTPStatus) http_retstatus;
 }
 
-int
-TSHttpTxnGetMaxHttpRetBodySize(void)
-{
-  return HTTP_TRANSACT_STATE_MAX_XBUF_SIZE;
-}
-
-void
-TSHttpTxnSetHttpRetBody(TSHttpTxn txnp, const char *body_msg, int plain_msg_flag)
-{
-  sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
-
-  HttpSM *sm = (HttpSM *) txnp;
-  HttpTransact::State *s = &(sm->t_state);
-
-  s->return_xbuf_size = 0;
-  s->return_xbuf[0] = 0;
-  s->return_xbuf_plain = false;
-  if (body_msg) {
-    ink_strlcpy(s->return_xbuf, body_msg, HTTP_TRANSACT_STATE_MAX_XBUF_SIZE);
-    s->return_xbuf_size = strlen(s->return_xbuf);
-    s->return_xbuf_plain = plain_msg_flag;
-  }
-}
-
 /* control channel for HTTP */
 TSReturnCode
 TSHttpTxnCntl(TSHttpTxn txnp, TSHttpCntlType cntl, void *data)
@@ -5775,17 +5770,19 @@ TSHttpTxnDebugGet(TSHttpTxn txnp)
   sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
   return ((HttpSM *)txnp)->debug_on;
 }
+
 void
 TSHttpSsnDebugSet(TSHttpSsn ssnp, int on)
 {
   sdk_assert(sdk_sanity_check_http_ssn(ssnp) == TS_SUCCESS);
   ((HttpClientSession *)ssnp)->debug_on = on;
 }
+
 int
 TSHttpSsnDebugGet(TSHttpSsn ssnp)
 {
   sdk_assert(sdk_sanity_check_http_ssn(ssnp) == TS_SUCCESS);
-  return ((HttpClientSession *)ssnp)->debug_on;
+  return ((HttpClientSession *)ssnp)->debug();
 }
 
 int
@@ -6082,18 +6079,11 @@ TSHttpAltInfoQualitySet(TSHttpAltInfo infop, float quality)
   info->m_qvalue = quality;
 }
 
-extern HttpAccept *plugin_http_accept;
-extern HttpAccept *plugin_http_transparent_accept;
+extern HttpSessionAccept *plugin_http_accept;
+extern HttpSessionAccept *plugin_http_transparent_accept;
 
 TSVConn
-TSHttpConnect(sockaddr const* addr)
-{
-  return TSHttpConnectWithProtoStack(addr, (1u << TS_PROTO_HTTP));
-}
-
-TSVConn
-TSHttpConnectWithProtoStack(sockaddr const* addr,
-                            TSClientProtoStack proto_stack)
+TSHttpConnectWithPluginId(sockaddr const* addr, char const* tag, int64_t id)
 {
   sdk_assert(addr);
 
@@ -6104,10 +6094,9 @@ TSHttpConnectWithProtoStack(sockaddr const* addr,
     PluginVCCore *new_pvc = PluginVCCore::alloc();
 
     new_pvc->set_active_addr(addr);
+    new_pvc->set_plugin_id(id);
+    new_pvc->set_plugin_tag(tag);
     new_pvc->set_accept_cont(plugin_http_accept);
-
-    new_pvc->active_vc.proto_stack = proto_stack;
-    new_pvc->passive_vc.proto_stack = proto_stack;
 
     PluginVC *return_vc = new_pvc->connect();
 
@@ -6123,6 +6112,12 @@ TSHttpConnectWithProtoStack(sockaddr const* addr,
   }
 
   return NULL;
+}
+
+TSVConn
+TSHttpConnect(sockaddr const* addr)
+{
+  return TSHttpConnectWithPluginId(addr, "plugin", 0);
 }
 
 TSVConn
@@ -6189,26 +6184,6 @@ TSActionDone(TSAction actionp)
 
 /* Connections */
 
-/* Deprectated.
-   Do not use this API.
-   The reason is even if VConn is created using this API, it is still useless.
-   For example, if we do TSVConnRead, the read operation returns read_vio, if
-   we do TSVIOReenable (read_vio), it actually calls:
-   void VIO::reenable()
-   {
-       if (vc_server) vc_server->reenable(this);
-   }
-   vc_server->reenable calls:
-   VConnection::reenable(VIO)
-
-   this function is virtual in VConnection.h. It is defined separately for
-   UnixNet, NTNet and CacheVConnection.
-
-   Thus, unless VConn is either NetVConnection or CacheVConnection, it can't
-   be instantiated for functions like reenable.
-
-   Meanwhile, this function has never been used.
-   */
 TSVConn
 TSVConnCreate(TSEventFunc event_funcp, TSMutex mutexp)
 {
@@ -6224,6 +6199,56 @@ TSVConnCreate(TSEventFunc event_funcp, TSMutex mutexp)
 
   i->init(event_funcp, mutexp);
   return reinterpret_cast<TSVConn>(i);
+}
+
+struct ActionSink : public Continuation
+{
+  ActionSink() : Continuation(NULL) {
+    SET_HANDLER(&ActionSink::mainEvent);
+  }
+
+  int mainEvent(int event, void * edata) {
+    // Just sink the event ...
+    Debug("iocore_net", "sinking event=%d (%s), edata=%p",
+        event, HttpDebugNames::get_event_name(event), edata);
+    return EVENT_CONT;
+  }
+};
+
+static ActionSink a;
+
+TSVConn
+TSVConnFdCreate(int fd)
+{
+  UnixNetVConnection * vc;
+
+  if (unlikely(fd == NO_FD)) {
+    return NULL;
+  }
+
+  vc = (UnixNetVConnection *)netProcessor.allocate_vc(this_ethread());
+  if (vc == NULL) {
+    return NULL;
+  }
+
+  // We need to set an Action to handle NET_EVENT_OPEN* events. Since we have a
+  // socket already, we don't need to do anything in those events, so we can just
+  // sink them. It's better to sink them here, than to make the NetVC code more
+  // complex.
+  vc->action_ = &a;
+
+  vc->id = net_next_connection_number();
+  vc->submit_time = ink_get_hrtime();
+  vc->set_is_transparent(false);
+  vc->mutex = new_ProxyMutex();
+
+  if (vc->connectUp(this_ethread(), fd) != CONNECT_SUCCESS) {
+    vc->free(this_ethread());
+    return NULL;
+  }
+
+  NET_SUM_GLOBAL_DYN_STAT(net_connections_currently_open_stat, 1);
+  return reinterpret_cast<TSVConn>(vc);
 }
 
 TSVIO
@@ -6665,7 +6690,7 @@ TSCacheScan(TSCont contp, TSCacheKey key, int KB_per_second)
 int
 TSStatCreate(const char *the_name, TSRecordDataType the_type, TSStatPersistence persist, TSStatSync sync)
 {
-  int id = ink_atomic_increment(&top_stat, 1);
+  int id = ink_atomic_increment(&api_rsb_index, 1);
   RecRawStatSyncCb syncer = RecRawStatSyncCount;
 
   // TODO: This only supports "int" data types at this point, since the "Raw" stats
@@ -6799,34 +6824,34 @@ TSTextLogObjectCreate(const char *filename, int mode, TSTextLogObject *new_objec
   sdk_assert(sdk_sanity_check_null_ptr((void*)filename) == TS_SUCCESS);
   sdk_assert(sdk_sanity_check_null_ptr((void*)new_object) == TS_SUCCESS);
 
-  if (mode<0 || mode>= TS_LOG_MODE_INVALID_FLAG) {
+  if (mode <0 || mode >= TS_LOG_MODE_INVALID_FLAG) {
     *new_object = NULL;
     return TS_ERROR;
   }
 
-  TextLogObject *tlog = NEW(new TextLogObject(filename, Log::config->logfile_dir,
-                                              (bool) mode & TS_LOG_MODE_ADD_TIMESTAMP,
-                                              NULL,
-                                              Log::config->rolling_enabled,
-                                              Log::config->collation_preproc_threads,
-                                              Log::config->rolling_interval_sec,
-                                              Log::config->rolling_offset_hr,
-                                              Log::config->rolling_size_mb));
-  if (tlog) {
-    int err = (mode & TS_LOG_MODE_DO_NOT_RENAME ?
-               Log::config->log_object_manager.manage_api_object(tlog, 0) :
-               Log::config->log_object_manager.manage_api_object(tlog));
-    if (err != LogObjectManager::NO_FILENAME_CONFLICTS) {
-      delete tlog;
-      *new_object = NULL;
-      return TS_ERROR;
-    }
-  } else {
+  TextLogObject *tlog = new TextLogObject(filename, Log::config->logfile_dir,
+                                          (bool) mode & TS_LOG_MODE_ADD_TIMESTAMP,
+                                          NULL,
+                                          Log::config->rolling_enabled,
+                                          Log::config->collation_preproc_threads,
+                                          Log::config->rolling_interval_sec,
+                                          Log::config->rolling_offset_hr,
+                                          Log::config->rolling_size_mb);
+  if (tlog == NULL) {
     *new_object = NULL;
     return TS_ERROR;
   }
+
+  int err = (mode & TS_LOG_MODE_DO_NOT_RENAME ?
+             Log::config->log_object_manager.manage_api_object(tlog, 0) :
+             Log::config->log_object_manager.manage_api_object(tlog));
+  if (err != LogObjectManager::NO_FILENAME_CONFLICTS) {
+    delete tlog;
+    *new_object = NULL;
+    return TS_ERROR;
+  }
+
   *new_object = (TSTextLogObject) tlog;
-
   return TS_SUCCESS;
 }
 
@@ -6886,12 +6911,17 @@ TSTextLogObjectHeaderSet(TSTextLogObject the_object, const char *header)
   ((TextLogObject *) the_object)->set_log_file_header(header);
 }
 
-void
+TSReturnCode
 TSTextLogObjectRollingEnabledSet(TSTextLogObject the_object, int rolling_enabled)
 {
   sdk_assert(sdk_sanity_check_iocore_structure(the_object) == TS_SUCCESS);
 
-  ((TextLogObject *) the_object)->set_rolling_enabled(rolling_enabled);
+  if (LogRollingEnabledIsValid(rolling_enabled)) {
+    ((TextLogObject *) the_object)->set_rolling_enabled((Log::RollingEnabledValues)rolling_enabled);
+    return TS_SUCCESS;
+  }
+
+  return TS_ERROR;
 }
 
 void
@@ -6908,6 +6938,14 @@ TSTextLogObjectRollingOffsetHrSet(TSTextLogObject the_object, int rolling_offset
   sdk_assert(sdk_sanity_check_iocore_structure(the_object) == TS_SUCCESS);
 
   ((TextLogObject *) the_object)->set_rolling_offset_hr(rolling_offset_hr);
+}
+
+void
+TSTextLogObjectRollingSizeMbSet(TSTextLogObject the_object, int rolling_size_mb)
+{
+  sdk_assert(sdk_sanity_check_iocore_structure(the_object) == TS_SUCCESS);
+
+  ((TextLogObject *) the_object)->set_rolling_size_mb(rolling_size_mb);
 }
 
 TSReturnCode
@@ -7139,7 +7177,41 @@ TSCacheHttpInfoSizeSet(TSCacheHttpInfo infop, int64_t size)
   info->object_size_set(size);
 }
 
+// This API tells the core to follow normal (301/302) redirects using the
+// standard Location: URL. This does not need to be called if you set an
+// explicit URL using TSRedirectUrlSet().
+TSReturnCode
+TSHttpTxnFollowRedirect(TSHttpTxn txnp, int on)
+{
+  sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
+
+  HttpSM *sm = (HttpSM *) txnp;
+
+  sm->enable_redirection = (on ? true : false);
+  return TS_SUCCESS;
+}
+
 // this function should be called at TS_EVENT_HTTP_READ_RESPONSE_HDR
+void
+TSHttpTxnRedirectUrlSet(TSHttpTxn txnp, const char* url, const int url_len)
+{
+  sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
+  sdk_assert(sdk_sanity_check_null_ptr((void*)url) == TS_SUCCESS);
+
+  HttpSM *sm = (HttpSM*) txnp;
+
+  if (sm->redirect_url != NULL) {
+    ats_free(sm->redirect_url);
+    sm->redirect_url = NULL;
+    sm->redirect_url_len = 0;
+  }
+
+  sm->redirect_url = (char*)url;
+  sm->redirect_url_len = url_len;
+  sm->enable_redirection = true;
+}
+
+// Deprecated, remove for v6.0.0
 void
 TSRedirectUrlSet(TSHttpTxn txnp, const char* url, const int url_len)
 {
@@ -7155,7 +7227,7 @@ TSRedirectUrlSet(TSHttpTxn txnp, const char* url, const int url_len)
   }
 
   sm->redirect_url = (char*)ats_malloc(url_len + 1);
-  ink_strlcpy(sm->redirect_url, (char*)url, url_len + 1);
+  ink_strlcpy(sm->redirect_url, url, url_len + 1);
   sm->redirect_url_len = url_len;
   // have to turn redirection on for this transaction if user wants to redirect to another URL
   if (sm->enable_redirection == false) {
@@ -7167,14 +7239,31 @@ TSRedirectUrlSet(TSHttpTxn txnp, const char* url, const int url_len)
 }
 
 const char*
-TSRedirectUrlGet(TSHttpTxn txnp, int *url_len_ptr)
+TSHttpTxnRedirectUrlGet(TSHttpTxn txnp, int *url_len_ptr)
 {
   sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
 
   HttpSM *sm = (HttpSM*)txnp;
 
   *url_len_ptr = sm->redirect_url_len;
-  return (const char*)sm->redirect_url;
+  return sm->redirect_url;
+}
+
+// Deprecated, remove for v6.0.0
+const char*
+TSRedirectUrlGet(TSHttpTxn txnp, int *url_len_ptr)
+{
+  return TSHttpTxnRedirectUrlGet(txnp, url_len_ptr);
+}
+
+int
+TSHttpTxnRedirectRetries(TSHttpTxn txnp)
+{
+  sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
+
+  HttpSM *sm = (HttpSM*)txnp;
+
+  return sm->redirection_tries;
 }
 
 char*
@@ -7234,12 +7323,12 @@ TSFetchUrl(const char* headers, int request_len, sockaddr const* ip , TSCont con
 }
 
 TSFetchSM
-TSFetchCreate(TSCont contp, TSFetchMethod method,
+TSFetchCreate(TSCont contp, const char *method,
               const char *url, const char *version,
               struct sockaddr const* client_addr, int flags)
 {
   sdk_assert(sdk_sanity_check_continuation(contp) == TS_SUCCESS);
-  sdk_assert(ats_is_ip4(client_addr));
+  sdk_assert(ats_is_ip(client_addr));
 
   FetchSM *fetch_sm = FetchSMAllocator.alloc();
 
@@ -7280,7 +7369,7 @@ TSFetchLaunch(TSFetchSM fetch_sm)
 {
   sdk_assert(sdk_sanity_check_fetch_sm(fetch_sm) == TS_SUCCESS);
 
-  ((FetchSM*)fetch_sm)->ext_lanuch();
+  ((FetchSM*)fetch_sm)->ext_launch();
 }
 
 void
@@ -7298,6 +7387,24 @@ TSFetchUserDataSet(TSFetchSM fetch_sm, void *data)
 
   ((FetchSM*)fetch_sm)->ext_set_user_data(data);
 }
+
+# if 0
+void
+TSFetchClientProtoStackSet(TSFetchSM fetch_sm, TSClientProtoStack proto_stack)
+{
+  sdk_assert(sdk_sanity_check_fetch_sm(fetch_sm) == TS_SUCCESS);
+
+  ((FetchSM*)fetch_sm)->ext_set_proto_stack(proto_stack);
+}
+
+TSClientProtoStack
+TSFetchClientProtoStackGet(TSFetchSM fetch_sm)
+{
+  sdk_assert(sdk_sanity_check_fetch_sm(fetch_sm) == TS_SUCCESS);
+
+  return ((FetchSM*)fetch_sm)->ext_get_proto_stack();
+}
+# endif
 
 void*
 TSFetchUserDataGet(TSFetchSM fetch_sm)
@@ -7324,20 +7431,26 @@ TSFetchRespHdrMLocGet(TSFetchSM fetch_sm)
 }
 
 TSReturnCode
+TSHttpIsInternalSession(TSHttpSsn ssnp)
+{
+  HttpClientSession *cs = (HttpClientSession *) ssnp;
+  if (!cs) {
+    return TS_ERROR;
+  }
+
+  NetVConnection *vc = cs->get_netvc();
+  if (!vc) {
+    return TS_ERROR;
+  }
+
+  return vc->get_is_internal_request() ? TS_SUCCESS : TS_ERROR;
+}
+
+TSReturnCode
 TSHttpIsInternalRequest(TSHttpTxn txnp)
 {
   sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
-
-  TSHttpSsn ssnp = TSHttpTxnSsnGet(txnp);
-  HttpClientSession *cs = (HttpClientSession *) ssnp;
-  if (!cs)
-    return TS_ERROR;
-
-  NetVConnection *vc = cs->get_netvc();
-  if (!vc)
-    return TS_ERROR;
-
-  return vc->get_is_internal_request() ? TS_SUCCESS : TS_ERROR;
+  return TSHttpIsInternalSession(TSHttpTxnSsnGet(txnp));
 }
 
 
@@ -7420,7 +7533,7 @@ TSAIOThreadNumSet(int thread_num)
 }
 
 void
-TSRecordDump(TSRecordType rec_type, TSRecordDumpCb callback, void *edata)
+TSRecordDump(int rec_type, TSRecordDumpCb callback, void *edata)
 {
   RecDumpRecords((RecT)rec_type, (RecDumpEntryCb)callback, edata);
 }
@@ -7731,7 +7844,6 @@ _conf_to_memberp(TSOverridableConfigKey conf,
     ret = &overridableHttpConfig->proxy_response_hsts_max_age;
     break;
   case TS_CONFIG_SSL_HSTS_INCLUDE_SUBDOMAINS:
-    typ = OVERRIDABLE_TYPE_BYTE;
     ret = &overridableHttpConfig->proxy_response_hsts_include_subdomains;
     break;
   case TS_CONFIG_HTTP_CACHE_OPEN_READ_RETRY_TIME:
@@ -7741,6 +7853,16 @@ _conf_to_memberp(TSOverridableConfigKey conf,
   case TS_CONFIG_HTTP_CACHE_MAX_OPEN_READ_RETRIES:
     typ = OVERRIDABLE_TYPE_INT;
     ret = &overridableHttpConfig->max_cache_open_read_retries;
+    break;
+  case TS_CONFIG_HTTP_CACHE_RANGE_WRITE:
+    ret = &overridableHttpConfig->cache_range_write;
+    break;
+  case TS_CONFIG_HTTP_POST_CHECK_CONTENT_LENGTH_ENABLED:
+    ret = &overridableHttpConfig->post_check_content_length_enabled;
+    break;
+  case TS_CONFIG_HTTP_GLOBAL_USER_AGENT_HEADER:
+    typ = OVERRIDABLE_TYPE_STRING;
+    ret = &overridableHttpConfig->global_user_agent_header;
     break;
 
     // This helps avoiding compiler warnings, yet detect unhandled enum members.
@@ -7898,7 +8020,6 @@ TSReturnCode
 TSHttpTxnConfigStringSet(TSHttpTxn txnp, TSOverridableConfigKey conf, const char* value, int length)
 {
   sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
-  sdk_assert(sdk_sanity_check_null_ptr((void*)value) == TS_SUCCESS);
 
   if (length == -1)
     length = strlen(value);
@@ -7909,8 +8030,22 @@ TSHttpTxnConfigStringSet(TSHttpTxn txnp, TSOverridableConfigKey conf, const char
 
   switch (conf) {
   case TS_CONFIG_HTTP_RESPONSE_SERVER_STR:
-    s->t_state.txn_conf->proxy_response_server_string = const_cast<char*>(value); // The "core" likes non-const char*
-    s->t_state.txn_conf->proxy_response_server_string_len = length;
+    if (value && length > 0) {
+      s->t_state.txn_conf->proxy_response_server_string = const_cast<char*>(value); // The "core" likes non-const char*
+      s->t_state.txn_conf->proxy_response_server_string_len = length;
+    } else {
+      s->t_state.txn_conf->proxy_response_server_string = NULL;
+      s->t_state.txn_conf->proxy_response_server_string_len = 0;
+    }
+    break;
+  case TS_CONFIG_HTTP_GLOBAL_USER_AGENT_HEADER:
+    if (value && length > 0) {
+      s->t_state.txn_conf->global_user_agent_header = const_cast<char*>(value); // The "core" likes non-const char*
+      s->t_state.txn_conf->global_user_agent_header_size = length;
+    } else {
+      s->t_state.txn_conf->global_user_agent_header = NULL;
+      s->t_state.txn_conf->global_user_agent_header_size = 0;
+    }
     break;
   default:
     return TS_ERROR;
@@ -7934,6 +8069,10 @@ TSHttpTxnConfigStringGet(TSHttpTxn txnp, TSOverridableConfigKey conf, const char
   case TS_CONFIG_HTTP_RESPONSE_SERVER_STR:
     *value = sm->t_state.txn_conf->proxy_response_server_string;
     *length = sm->t_state.txn_conf->proxy_response_server_string_len;
+    break;
+  case TS_CONFIG_HTTP_GLOBAL_USER_AGENT_HEADER:
+    *value = sm->t_state.txn_conf->global_user_agent_header;
+    *length = sm->t_state.txn_conf->global_user_agent_header_size;
     break;
   default:
     return TS_ERROR;
@@ -7985,8 +8124,16 @@ TSHttpTxnConfigFind(const char* name, int length, TSOverridableConfigKey *conf, 
     break;
 
   case 35:
-    if (!strncmp(name, "proxy.config.http.normalize_ae_gzip", length))
-      cnf = TS_CONFIG_HTTP_NORMALIZE_AE_GZIP;
+    switch (name[length-1]) {
+    case 'e':
+      if (!strncmp(name, "proxy.config.http.cache.range.write", length))
+        cnf = TS_CONFIG_HTTP_CACHE_RANGE_WRITE;
+      break;
+    case 'p':
+      if (!strncmp(name, "proxy.config.http.normalize_ae_gzip", length))
+        cnf = TS_CONFIG_HTTP_NORMALIZE_AE_GZIP;
+      break;
+    }
     break;
 
   case 36:
@@ -8137,6 +8284,10 @@ TSHttpTxnConfigFind(const char* name, int length, TSOverridableConfigKey *conf, 
     case 'r':
       if (!strncmp(name, "proxy.config.http.anonymize_remove_referer", length))
         cnf = TS_CONFIG_HTTP_ANONYMIZE_REMOVE_REFERER;
+      else if (!strncmp(name, "proxy.config.http.global_user_agent_header", length)) {
+        cnf = TS_CONFIG_HTTP_GLOBAL_USER_AGENT_HEADER;
+        typ = TS_RECORDDATATYPE_STRING;
+      }
       break;
     case 't':
       if (!strncmp(name, "proxy.config.net.sock_recv_buffer_size_out", length))
@@ -8300,8 +8451,16 @@ TSHttpTxnConfigFind(const char* name, int length, TSOverridableConfigKey *conf, 
     break;
 
   case 51:
-    if (!strncmp(name, "proxy.config.http.keep_alive_no_activity_timeout_in", length))
-      cnf = TS_CONFIG_HTTP_KEEP_ALIVE_NO_ACTIVITY_TIMEOUT_IN;
+    switch (name[length-1]) {
+    case 'n':
+      if (!strncmp(name, "proxy.config.http.keep_alive_no_activity_timeout_in", length))
+        cnf = TS_CONFIG_HTTP_KEEP_ALIVE_NO_ACTIVITY_TIMEOUT_IN;
+      break;
+    case 'd':
+      if (!strncmp(name, "proxy.config.http.post.check.content_length.enabled", length))
+        cnf = TS_CONFIG_HTTP_POST_CHECK_CONTENT_LENGTH_ENABLED;
+      break;
+    }
     break;
 
   case 52:
@@ -8415,7 +8574,7 @@ TSHttpTxnCloseAfterResponse (TSHttpTxn txnp, int should_close)
 TSPortDescriptor
 TSPortDescriptorParse(const char * descriptor)
 {
-  HttpProxyPort * port = NEW(new HttpProxyPort());
+  HttpProxyPort * port = new HttpProxyPort();
 
   if (descriptor && port->processOptions(descriptor)) {
     return (TSPortDescriptor)port;
@@ -8512,3 +8671,111 @@ TSHttpEventNameLookup(TSEvent event)
 {
   return HttpDebugNames::get_event_name(static_cast<int>(event));
 }
+
+/// Re-enable SSL VC.
+class TSSslCallback : public Continuation
+{
+public:
+  TSSslCallback(SSLNetVConnection *vc)
+    : Continuation(vc->mutex), m_vc(vc)
+  {
+    SET_HANDLER(&TSSslCallback::event_handler);
+  }
+
+  int event_handler(int, void*)
+  {
+    m_vc->reenable(m_vc->nh);
+    delete this;
+    return 0;
+  }
+
+private:
+  SSLNetVConnection* m_vc;
+};
+
+
+/// SSL Hooks
+TSReturnCode
+TSVConnTunnel(TSVConn sslp)
+{
+  NetVConnection *vc = reinterpret_cast<NetVConnection*>(sslp);
+  SSLNetVConnection *ssl_vc = dynamic_cast<SSLNetVConnection*>(vc);
+  TSReturnCode zret = TS_SUCCESS;
+  if (0 != ssl_vc) {
+    ssl_vc->hookOpRequested = TS_SSL_HOOK_OP_TUNNEL;
+  } else {
+    zret = TS_ERROR;
+  }
+  return zret;
+}
+
+TSSslConnection
+TSVConnSSLConnectionGet(TSVConn sslp)
+{
+  TSSslConnection ssl = NULL;
+  NetVConnection *vc = reinterpret_cast<NetVConnection*>(sslp);
+  SSLNetVConnection *ssl_vc = dynamic_cast<SSLNetVConnection*>(vc);
+  if (ssl_vc != NULL) {
+    ssl = reinterpret_cast<TSSslConnection>(ssl_vc->ssl);
+  }
+  return ssl;
+}
+
+tsapi TSSslContext TSSslContextFindByName(const char *name)
+{
+  TSSslContext ret = NULL;
+  SSLCertLookup *lookup = SSLCertificateConfig::acquire();
+  if (lookup != NULL) {
+    SSLCertContext *cc = lookup->find(name);
+    if (cc && cc->ctx) {
+      ret = reinterpret_cast<TSSslContext>(cc->ctx);
+    }
+    SSLCertificateConfig::release(lookup);
+  }
+  return ret;
+}
+tsapi TSSslContext TSSslContextFindByAddr(struct sockaddr const* addr)
+{
+  TSSslContext ret = NULL;
+  SSLCertLookup *lookup = SSLCertificateConfig::acquire();
+  if (lookup != NULL) {
+    IpEndpoint ip;
+    ip.assign(addr);
+    SSLCertContext *cc = lookup->find(ip);
+    if (cc && cc->ctx) {
+      ret = reinterpret_cast<TSSslContext>(cc->ctx);
+    }
+    SSLCertificateConfig::release(lookup);
+  }
+  return ret;
+}
+
+tsapi int TSVConnIsSsl(TSVConn sslp)
+{
+  NetVConnection *vc = reinterpret_cast<NetVConnection*>(sslp);
+  SSLNetVConnection *ssl_vc = dynamic_cast<SSLNetVConnection*>(vc);
+  return ssl_vc != NULL;
+}
+
+void
+TSVConnReenable(TSVConn vconn)
+{
+  NetVConnection *vc = reinterpret_cast<NetVConnection *>(vconn);
+  SSLNetVConnection *ssl_vc = dynamic_cast<SSLNetVConnection*>(vc);
+  // We really only deal with a SSLNetVConnection at the moment
+  if (ssl_vc != NULL) {
+    EThread *eth = this_ethread();
+
+    // We use the VC mutex so we don't need to reschedule again if we
+    // can't get the lock. For this reason we need to execute the
+    // callback on the VC thread or it doesn't work (not sure why -
+    // deadlock or it ends up interacting with the wrong NetHandler).
+    MUTEX_TRY_LOCK(trylock, ssl_vc->mutex, eth);
+    if (!trylock.is_locked()) {
+      ssl_vc->thread->schedule_imm(new TSSslCallback(ssl_vc));
+    }   else {
+      ssl_vc->reenable(ssl_vc->nh);
+    }
+  }
+}
+

@@ -1,4 +1,19 @@
 #
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 msgid ""
 msgstr ""
 "Project-Id-Version: Apache Traffic Server 4.1\n"
@@ -27,12 +42,10 @@ msgstr "Traffic Line を使用して Traffic Server を設定する"
 #: ../../admin/configuring-traffic-server.en.rst:34
 msgid ""
 "Traffic Line enables you to quickly and easily change your Traffic Server "
-"configuration via command-line interface. Alternatively, you can also use :"
-"program:`traffic_shell` to configure Traffic Server."
+"configuration via command-line interface.
 msgstr ""
 "Traffic Line はコマンドラインインターフェースで手早く簡単に Traffic Server "
 "の設定を変更することを可能にします。あるいは Traffic Server を設定するため"
-"に :program:`traffic_shell` を使用することもできます。"
 
 #: ../../admin/configuring-traffic-server.en.rst:39
 msgid "View Configuration Options in Traffic Line"
