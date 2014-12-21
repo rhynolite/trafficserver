@@ -1939,6 +1939,7 @@ AC_CONFIG_FILES([
   lib/atscppapi/examples/internal_transaction_handling/Makefile
   lib/atscppapi/examples/async_timer/Makefile
   lib/atscppapi/examples/intercept/Makefile
+  lib/atscppapi/examples/boom/Makefile
   lib/wccp/Makefile
   lib/perl/Makefile
   lib/perl/lib/Apache/TS.pm
