@@ -71,6 +71,7 @@ function killAll() {
 }
 
 function updateInstall() {
+    mkdir -p $FULL_BUILD_PATH 
     if [ "$DISTRIB_ID" = "$UBUNTU" ]; then
         apt-get update
         apt-get install -y g++ autoconf \
@@ -82,7 +83,7 @@ function updateInstall() {
         libpcre3-dev \
         curl
         apt-get install -y subversion git git-svn
-    elif [ "$DISTRIB_ID" = "$FEDORA" ]; then
+    elif [ "$DISTRIB_ID" = "$FEDORA" ] || [ "$DISTRIB_ID" = "$REDHAT" ] ; then
         yum update
         yum upgrade
 
@@ -257,12 +258,12 @@ function flipEC2() {
     getConfigureOptions;
 }
 
-# Crude but it works without complex regex, and some people remove ec2/ami tools for security...
+# EC2 magic - the 169.254.169.254 hosts the EC2 metadata directory. 
+# if it is available, we are running on EC2 cluster. 
+# Otherwise, the metadata directory server will be firewalled.
 function detectEC2() {
-    if [ -e /etc/ec2_version ]; then #UBUNTU
-        USING_EC2=$TRUE
-    elif [ -e /etc/ec2/release-notes ]; then #FEDORA
-        USING_EC2=$TRUE
+    if [ ! -z $(curl -s http://169.254.169.254/1.0/) ] ; then # AMAZON metadata accessible 
+	USING_EC2=$TRUE 
     fi
 }
 
